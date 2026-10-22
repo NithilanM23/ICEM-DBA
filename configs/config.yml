@@ -12,10 +12,10 @@ PATH: ./checkpoints               # Checkpoint directory
 RESULTS: ./results                # Evaluation output directory
 
 # Dataset Paths
-TRAIN_IMAGE_FLIST: "~/datasets/celeba_hq_256/train"   # Path to training image folder or .flist
-TRAIN_MASK_FLIST: ""                                  # Leave empty for procedural irregular masks
-TEST_IMAGE_FLIST: "~/datasets/celeba_hq_256/val"       # Path to testing image folder or .flist
-TEST_MASK_FLIST: ""                                   # Leave empty for procedural irregular masks
+TRAIN_IMAGE_FLIST: "./data/train_celebahq.flist"   # Path to training image .flist or folder
+TRAIN_MASK_FLIST: ""                               # Leave empty for procedural irregular masks
+TEST_IMAGE_FLIST: "./data/val_celebahq.flist"       # Path to testing image .flist or folder
+TEST_MASK_FLIST: ""                                # Leave empty for procedural irregular masks
 
 # Architecture Hyperparameters
 INPUT_SIZE: 256                   # Input image resolution (256x256)
@@ -42,8 +42,8 @@ ENABLE_LC_VER: true               # Linear-Complexity Visible Exemplar Readout
 ENABLE_DBA_T: true                # Directional Boundary Affinity Transition
 
 # Optimization & Training
-BATCH_SIZE: 4                     # Micro-batch size (2 per GPU across dual A40s)
-GRAD_ACCUM_STEPS: 4               # Gradient accumulation steps (Effective batch size = 4 x 4 = 16)
+BATCH_SIZE: 16                    # Micro-batch size (utilizes ~11GB of 48GB A40 VRAM)
+GRAD_ACCUM_STEPS: 1               # Effective batch size = 16 x 1 = 16 (1,625 steps/epoch)
 USE_CHECKPOINT: true              # Activation checkpointing per block (drops VRAM usage by >80%)
 LR: 0.0001                        # Generator learning rate
 D2G_LR: 0.1                       # Discriminator/Generator learning rate ratio
