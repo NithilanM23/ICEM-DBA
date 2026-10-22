@@ -168,7 +168,7 @@ class TVLoss(nn.Module):
 
 
 class BoundarySeamLoss(nn.Module):
-    """
+    r"""
     Boundary Seam Discrepancy (BSD) Loss:
     Measures gradient continuity across the mask perimeter \partial \Omega,
     directly validating Hypothesis 2 of the ICEM-DBA formulation.

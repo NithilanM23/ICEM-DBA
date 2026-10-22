@@ -8,7 +8,7 @@ import math
 # =========================================================================
 
 def get_distance_map(mask, max_iters=128):
-    """
+    r"""
     Computes both:
     1. dist_priority: [B, 1, H, W] inverse distance confidence (1.0 at boundary -> 0.0 at center)
        used to enforce MACG traversal: Known -> Boundary Fringe -> Hole Center.
@@ -107,7 +107,7 @@ class CNNScoreMap(nn.Module):
 # =========================================================================
 
 class DirectionalBoundaryAffinity(nn.Module):
-    """
+    r"""
     Computes 2D physical gradient of the distance field \nabla D(p) and feature gradient \nabla F(p),
     evaluates directional cosine alignment \kappa_t, and generates state retention modulation.
     Locks state retention along continuous physical contours (jawline, hair flow, architectural lines).
