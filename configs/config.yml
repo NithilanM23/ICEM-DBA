@@ -7,7 +7,7 @@
 # Mode & Hardware
 MODE: 1                           # 1: train, 2: test, 3: eval
 SEED: 10                          # Random seed
-GPU: [0]                          # List of GPU ids
+GPU: [0, 1]                       # List of GPU ids (both NVIDIA A40s)
 PATH: ./checkpoints               # Checkpoint directory
 RESULTS: ./results                # Evaluation output directory
 
@@ -41,7 +41,7 @@ ENABLE_LC_VER: true               # Linear-Complexity Visible Exemplar Readout
 ENABLE_DBA_T: true                # Directional Boundary Affinity Transition
 
 # Optimization & Training
-BATCH_SIZE: 4                     # Fits comfortably in 8GB VRAM
+BATCH_SIZE: 16                    # Scaled for 2x 48GB NVIDIA A40 GPUs (8 per GPU)
 LR: 0.0001                        # Generator learning rate
 D2G_LR: 0.1                       # Discriminator/Generator learning rate ratio
 BETA1: 0.9                        # Adam optimizer beta1

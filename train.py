@@ -18,17 +18,20 @@ def parse_args():
     parser.add_argument('--lr', type=float, default=None, help='Override generator learning rate')
     parser.add_argument('--max_iters', type=int, default=None, help='Override max iterations')
     parser.add_argument('--input_size', type=int, default=None, help='Override image resolution (e.g. 256)')
-    parser.add_argument('--gpu', type=str, default='0', help='CUDA visible devices (e.g. "0")')
+    parser.add_argument('--gpu', type=str, default=None, help='CUDA visible devices (e.g. "0" or "0,1")')
     return parser.parse_args()
 
 def main():
     args = parse_args()
     
-    # Set CUDA device visibility
-    os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
-
     # Load configuration
     config = Config(args.config)
+
+    # Set CUDA device visibility from argument or config
+    if args.gpu is not None:
+        os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
+    elif hasattr(config, 'GPU') and isinstance(config.GPU, list):
+        os.environ['CUDA_VISIBLE_DEVICES'] = ','.join(str(g) for g in config.GPU)
     if args.batch_size is not None:
         config.BATCH_SIZE = args.batch_size
     if args.lr is not None:
