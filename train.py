@@ -82,12 +82,13 @@ def main():
     )
 
     batch_size = config.BATCH_SIZE
-    num_workers = 2 if os.name != 'nt' else 0  # 0 on Windows to prevent multiprocessing deadlocks
+    num_workers = 4 if os.name != 'nt' else 0  # Multi-threaded dataloading on Linux
     train_loader = DataLoader(
         dataset=train_dataset,
         batch_size=batch_size,
         shuffle=True,
         num_workers=num_workers,
+        pin_memory=torch.cuda.is_available(),
         drop_last=True
     )
 
