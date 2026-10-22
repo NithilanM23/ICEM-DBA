@@ -51,9 +51,10 @@ class ICEM_DBA_InpaintingModel(nn.Module):
 
         # Multi-GPU support if configured
         gpus = getattr(config, 'GPU', [0])
-        if torch.cuda.is_available() and len(gpus) > 1:
-            self.generator = nn.DataParallel(self.generator, gpus)
-            self.discriminator = nn.DataParallel(self.discriminator, gpus)
+        if torch.cuda.is_available() and len(gpus) > 1 and torch.cuda.device_count() > 1:
+            print(f"[Model] Wrapping Generator & Discriminator with nn.DataParallel across GPUs: {gpus}")
+            self.generator = nn.DataParallel(self.generator, device_ids=gpus)
+            self.discriminator = nn.DataParallel(self.discriminator, device_ids=gpus)
 
         # Loss Criteria
         self.vgg_pretrained = getattr(config, 'VGG_PRETRAINED', True)
