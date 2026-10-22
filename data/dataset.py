@@ -7,7 +7,7 @@ from PIL import Image
 import numpy as np
 import torchvision.transforms.functional as TF
 
-from ..utils.tools import create_mask
+from utils.tools import create_mask
 
 class InpaintingDataset(Dataset):
     """
