@@ -53,9 +53,13 @@ def main():
         print(f"[Device] Detected {gpu_count} CUDA Device(s):")
         for i in range(gpu_count):
             print(f"  - GPU [{i}]: {torch.cuda.get_device_name(i)} ({torch.cuda.get_device_properties(i).total_memory / 1e9:.2f} GB)")
-        if len(gpus) > 1 and gpu_count > 1:
+        primary_gpu = gpus[0] if isinstance(gpus, list) and len(gpus) > 0 else 0
+        config.DEVICE = torch.device(f'cuda:{primary_gpu}')
+        torch.cuda.set_device(config.DEVICE)
+        if len(gpus) > 1 and gpu_count > 1 and not getattr(config, 'USE_CHECKPOINT', True):
             print(f"[Hardware] Multi-GPU Mode: Active parallelization across GPUs {gpus}")
-        config.DEVICE = torch.device('cuda:0')
+        else:
+            print(f"[Hardware] Single-GPU Mode: Running on primary GPU [{primary_gpu}] ({torch.cuda.get_device_properties(primary_gpu).total_memory / 1e9:.2f} GB)")
         torch.backends.cudnn.benchmark = True
     else:
         print("[Device] CUDA not available, using CPU.")

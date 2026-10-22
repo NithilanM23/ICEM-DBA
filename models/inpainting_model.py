@@ -52,10 +52,16 @@ class ICEM_DBA_InpaintingModel(nn.Module):
 
         # Multi-GPU support if configured
         gpus = getattr(config, 'GPU', [0])
+        use_checkpoint = bool(getattr(config, 'USE_CHECKPOINT', True))
         if torch.cuda.is_available() and len(gpus) > 1 and torch.cuda.device_count() > 1:
-            print(f"[Model] Wrapping Generator & Discriminator with nn.DataParallel across GPUs: {gpus}")
-            self.generator = nn.DataParallel(self.generator, device_ids=gpus)
-            self.discriminator = nn.DataParallel(self.discriminator, device_ids=gpus)
+            if use_checkpoint:
+                print(f"[Hardware] Notice: Activation checkpointing is active. PyTorch DataParallel multi-threading")
+                print(f"           conflicts with autograd checkpointing and spectral norm cuBLAS contexts.")
+                print(f"           Running stably on primary GPU [{gpus[0]}] with 48GB VRAM buffer.")
+            else:
+                print(f"[Model] Wrapping Generator & Discriminator with nn.DataParallel across GPUs: {gpus}")
+                self.generator = nn.DataParallel(self.generator, device_ids=gpus)
+                self.discriminator = nn.DataParallel(self.discriminator, device_ids=gpus)
 
         # Loss Criteria
         self.vgg_pretrained = getattr(config, 'VGG_PRETRAINED', True)
