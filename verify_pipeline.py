@@ -206,8 +206,9 @@ def test_discriminator_and_losses():
 def test_end_to_end_training_step():
     print_test_header("10. Full InpaintingModel 2-Phase Optimization Step")
     B, H, W = 2, 64, 64
-    images = torch.rand(B, 3, H, W)
-    masks = torch.zeros(B, 1, H, W)
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    images = torch.rand(B, 3, H, W).to(device)
+    masks = torch.zeros(B, 1, H, W).to(device)
     masks[:, :, 16:48, 16:48] = 1.0
 
     cfg = Config(
@@ -221,7 +222,7 @@ def test_end_to_end_training_step():
         INPUT_SIZE=64,
         LR=1e-4,
         VGG_PRETRAINED=False,
-        DEVICE=torch.device('cpu')
+        DEVICE=device
     )
 
     model = ICEM_DBA_InpaintingModel(cfg)
