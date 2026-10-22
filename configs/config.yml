@@ -42,8 +42,9 @@ ENABLE_LC_VER: true               # Linear-Complexity Visible Exemplar Readout
 ENABLE_DBA_T: true                # Directional Boundary Affinity Transition
 
 # Optimization & Training
-BATCH_SIZE: 16                    # Micro-batch size (utilizes ~11GB of 48GB A40 VRAM)
-GRAD_ACCUM_STEPS: 1               # Effective batch size = 16 x 1 = 16 (1,625 steps/epoch)
+BATCH_SIZE: 8                     # Micro-batch size (8 images per step, ~5GB VRAM)
+GRAD_ACCUM_STEPS: 2               # Gradient accumulation (Effective batch size = 8 x 2 = 16)
+NUM_WORKERS: 2                    # DataLoader workers (Docker /dev/shm safe)
 USE_CHECKPOINT: true              # Activation checkpointing per block (drops VRAM usage by >80%)
 LR: 0.0001                        # Generator learning rate
 D2G_LR: 0.1                       # Discriminator/Generator learning rate ratio

@@ -5,7 +5,14 @@ import argparse
 import random
 import numpy as np
 import torch
+import torch.multiprocessing as mp
 from torch.utils.data import DataLoader
+
+# Use file_system sharing strategy to prevent shared memory (/dev/shm) crashes in Docker containers
+try:
+    mp.set_sharing_strategy('file_system')
+except Exception:
+    pass
 
 from utils.config import Config
 from utils.tools import create_dir, stitch_images, imsave, Progbar, postprocess
@@ -18,6 +25,7 @@ def parse_args():
     parser.add_argument('--config', type=str, default='./configs/config.yml', help='Path to configuration YAML')
     parser.add_argument('--batch_size', type=int, default=None, help='Override training batch size')
     parser.add_argument('--grad_accum_steps', type=int, default=None, help='Override gradient accumulation steps')
+    parser.add_argument('--num_workers', type=int, default=None, help='Override DataLoader num_workers')
     parser.add_argument('--lr', type=float, default=None, help='Override generator learning rate')
     parser.add_argument('--max_iters', type=int, default=None, help='Override max iterations')
     parser.add_argument('--input_size', type=int, default=None, help='Override image resolution (e.g. 256)')
@@ -39,6 +47,8 @@ def main():
         config.BATCH_SIZE = args.batch_size
     if args.grad_accum_steps is not None:
         config.GRAD_ACCUM_STEPS = args.grad_accum_steps
+    if args.num_workers is not None:
+        config.NUM_WORKERS = args.num_workers
     if args.lr is not None:
         config.LR = args.lr
     if args.max_iters is not None:
@@ -91,7 +101,7 @@ def main():
     )
 
     batch_size = config.BATCH_SIZE
-    num_workers = 4 if os.name != 'nt' else 0  # Multi-threaded dataloading on Linux
+    num_workers = int(getattr(config, 'NUM_WORKERS', 2 if os.name != 'nt' else 0))
     train_loader = DataLoader(
         dataset=train_dataset,
         batch_size=batch_size,
@@ -125,6 +135,7 @@ def main():
     print(f" Dataset Size:      {len(train_dataset)} images ({steps_per_epoch} batches/epoch)")
     print(f" Micro-Batch Size:  {batch_size} (distributed across active GPUs)")
     print(f" Effective Batch:   {effective_batch} ({batch_size} micro-batch x {accum_steps} accum steps)")
+    print(f" DataLoader:        Workers: {num_workers} | Sharing: file_system (Docker /dev/shm safe)")
     print(f" Memory Mode:       Checkpointing: {use_checkpoint} | Allocator: expandable_segments")
     print(f" Resolution:        {config.INPUT_SIZE}x{config.INPUT_SIZE} -> {token_dim}x{token_dim} Tokens ({token_dim * token_dim} tokens/layer)")
     print(f" Learning Rate:     Gen: {config.LR} | Dis: {config.LR * getattr(config, 'D2G_LR', 0.1)}")
