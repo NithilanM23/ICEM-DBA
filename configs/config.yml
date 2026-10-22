@@ -1,0 +1,67 @@
+# =========================================================================
+# ICEM-DBA: Instance-Conditioned Exemplar Memory with Directional Boundary Affinity
+# Configuration file for CelebA-HQ / Places2 (256x256) Inpainting
+# Optimized for 8GB VRAM (e.g. RTX 5060 Laptop GPU)
+# =========================================================================
+
+# Mode & Hardware
+MODE: 1                           # 1: train, 2: test, 3: eval
+SEED: 10                          # Random seed
+GPU: [0]                          # List of GPU ids
+PATH: ./checkpoints               # Checkpoint directory
+RESULTS: ./results                # Evaluation output directory
+
+# Dataset Paths
+TRAIN_IMAGE_FLIST: ""             # Path to training image folder or .flist
+TRAIN_MASK_FLIST: ""              # Path to training mask folder or .flist
+TEST_IMAGE_FLIST: ""              # Path to testing image folder or .flist
+TEST_MASK_FLIST: ""               # Path to testing mask folder or .flist
+
+# Architecture Hyperparameters
+INPUT_SIZE: 256                   # Input image resolution (256x256)
+DIM: 48                           # Base feature dimension (level 1)
+NUM_BLOCKS: [4, 6, 6, 8]          # Blocks per encoder level and latent stage
+NUM_REFINEMENT_BLOCKS: 4          # Blocks in final refinement stage
+D_STATE: 16                       # SSM recurrent hidden state dimension
+INNER_RANK: 32                    # DIG-SM prompt dictionary rank (r)
+D_KEY: 16                         # LC-VER kernel key projection dimension (d_key)
+FFN_EXPANSION_FACTOR: 2           # SEFN Feed-Forward expansion ratio
+
+# Ablation Variant Configuration (Section 6.2 of Research Paper)
+# Options:
+#   V1: AC-Mamba baseline (MACG single-scan, static codebook)
+#   V2: + DIG-SM (Instance-conditioned prompt synthesis)
+#   V3: + LC-VER (Kernelized linear visible exemplar readout)
+#   V4: + DBA-T (Directional boundary gradient alignment)
+#   V5: Full ICEM-DBA (MACG + DIG-SM + LC-VER + DBA-T)
+ABLATION_VARIANT: V5
+ENABLE_MACG: true                 # Mask-Aware Confidence Guidance pathfinder
+ENABLE_DIG_SM: true               # Dynamic Instance-Grounded Semantic Modulation
+ENABLE_LC_VER: true               # Linear-Complexity Visible Exemplar Readout
+ENABLE_DBA_T: true                # Directional Boundary Affinity Transition
+
+# Optimization & Training
+BATCH_SIZE: 4                     # Fits comfortably in 8GB VRAM
+LR: 0.0001                        # Generator learning rate
+D2G_LR: 0.1                       # Discriminator/Generator learning rate ratio
+BETA1: 0.9                        # Adam optimizer beta1
+BETA2: 0.999                      # Adam optimizer beta2
+LR_DECAY: 0.5                     # Multi-step LR decay factor
+MILESTONES: [20000, 40000, 60000, 80000, 120000]
+MAX_ITERS: 4000000                # Total training iterations
+
+# Loss Function Weights
+L1_LOSS_WEIGHT: 1.0               # L1 reconstruction loss weight (normalized by mask area)
+STYLE_LOSS_WEIGHT: 250.0          # Gram matrix style loss weight
+CONTENT_LOSS_WEIGHT: 0.1          # VGG perceptual feature loss weight
+INPAINT_ADV_LOSS_WEIGHT: 0.01     # Adversarial loss weight
+TV_LOSS_WEIGHT: 0.0               # Total variation regularization weight
+BSD_LOSS_WEIGHT: 1.0              # Boundary Seam Discrepancy loss weight
+GAN_LOSS: lsgan                   # Adversarial loss type: lsgan | hinge | nsgan
+
+# Logging & Checkpointing
+SAVE_INTERVAL: 1000               # Save model checkpoint every N iterations
+SAMPLE_INTERVAL: 500              # Generate sample visual reconstructions every N iterations
+LOG_INTERVAL: 20                  # Print training progress every N iterations
+SAMPLE_SIZE: 4                    # Number of images to stitch during sampling
+VERBOSE: 1

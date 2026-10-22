@@ -1,0 +1,205 @@
+import os
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import torch.nn.functional as F
+
+from .generator import ICEM_DBA_Net
+from .discriminator import Discriminator
+from .loss import AdversarialLoss, PerceptualLoss, StyleLoss, TVLoss, BoundarySeamLoss
+
+class ICEM_DBA_InpaintingModel(nn.Module):
+    """
+    High-level Inpainting Model coordinator managing generator, discriminator,
+    losses, optimizers, learning rate scheduling, mixed precision, and checkpointing.
+    """
+    def __init__(self, config):
+        super().__init__()
+        self.config = config
+        self.iteration = 0
+        self.device = getattr(config, 'DEVICE', torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
+
+        # Checkpoint paths
+        save_dir = getattr(config, 'PATH', './checkpoints')
+        self.gen_weights_path = os.path.join(save_dir, 'icem_dba_gen.pth')
+        self.dis_weights_path = os.path.join(save_dir, 'icem_dba_dis.pth')
+
+        # Instantiate ICEM-DBA Generator & Discriminator
+        dim = getattr(config, 'DIM', 48)
+        num_blocks = getattr(config, 'NUM_BLOCKS', [4, 6, 6, 8])
+        num_refinement_blocks = getattr(config, 'NUM_REFINEMENT_BLOCKS', 4)
+        d_state = getattr(config, 'D_STATE', 16)
+        inner_rank = getattr(config, 'INNER_RANK', 32)
+        d_key = getattr(config, 'D_KEY', 16)
+
+        self.generator = ICEM_DBA_Net(
+            inp_channels=4,
+            out_channels=3,
+            dim=dim,
+            num_blocks=num_blocks,
+            num_refinement_blocks=num_refinement_blocks,
+            d_state=d_state,
+            inner_rank=inner_rank,
+            d_key=d_key
+        ).to(self.device)
+
+        use_sigmoid = (getattr(config, 'GAN_LOSS', 'lsgan') != 'hinge')
+        self.discriminator = Discriminator(
+            in_channels=3,
+            use_sigmoid=use_sigmoid
+        ).to(self.device)
+
+        # Multi-GPU support if configured
+        gpus = getattr(config, 'GPU', [0])
+        if torch.cuda.is_available() and len(gpus) > 1:
+            self.generator = nn.DataParallel(self.generator, gpus)
+            self.discriminator = nn.DataParallel(self.discriminator, gpus)
+
+        # Loss Criteria
+        vgg_pretrained = getattr(config, 'VGG_PRETRAINED', True)
+        self.l1_loss = nn.L1Loss().to(self.device)
+        self.perceptual_loss = PerceptualLoss(pretrained=vgg_pretrained).to(self.device)
+        self.style_loss = StyleLoss(pretrained=vgg_pretrained).to(self.device)
+        self.tv_loss = TVLoss().to(self.device)
+        self.bsd_loss = BoundarySeamLoss().to(self.device)
+        self.adversarial_loss = AdversarialLoss(type=getattr(config, 'GAN_LOSS', 'lsgan')).to(self.device)
+
+        # Optimizers
+        lr = float(getattr(config, 'LR', 1e-4))
+        d2g_lr = float(getattr(config, 'D2G_LR', 0.1))
+        beta1 = float(getattr(config, 'BETA1', 0.9))
+        beta2 = float(getattr(config, 'BETA2', 0.999))
+
+        self.gen_optimizer = optim.Adam(
+            params=self.generator.parameters(),
+            lr=lr,
+            betas=(beta1, beta2)
+        )
+        self.dis_optimizer = optim.Adam(
+            params=self.discriminator.parameters(),
+            lr=lr * d2g_lr,
+            betas=(beta1, beta2)
+        )
+
+        # Schedulers
+        milestones = getattr(config, 'MILESTONES', [20000, 40000, 60000, 80000, 120000])
+        gamma = float(getattr(config, 'LR_DECAY', 0.5))
+        self.gen_scheduler = optim.lr_scheduler.MultiStepLR(self.gen_optimizer, milestones=milestones, gamma=gamma)
+        self.dis_scheduler = optim.lr_scheduler.MultiStepLR(self.dis_optimizer, milestones=milestones, gamma=gamma)
+
+        # Mixed Precision Scaler
+        use_cuda = torch.cuda.is_available() and ('cuda' in str(self.device))
+        self.device_type = 'cuda' if use_cuda else 'cpu'
+        self.scaler = torch.amp.GradScaler('cuda', enabled=use_cuda)
+
+    def forward(self, images, masks):
+        return self.generator(images, masks)
+
+    def process(self, images, masks):
+        """
+        Executes forward pass, evaluates generator and discriminator loss objectives,
+        and executes clean 2-phase optimizer steps.
+        """
+        self.iteration += 1
+
+        use_cuda = torch.cuda.is_available() and ('cuda' in str(self.device))
+        device_type = 'cuda' if use_cuda else 'cpu'
+
+        # -------------------------------------------------------------
+        # 1. Generator forward pass (initial prediction)
+        # -------------------------------------------------------------
+        with torch.amp.autocast(device_type, enabled=use_cuda):
+            outputs_img = self(images, masks)
+
+        # -------------------------------------------------------------
+        # 2. Phase 1: Train Discriminator
+        # -------------------------------------------------------------
+        self.dis_optimizer.zero_grad()
+        with torch.amp.autocast(device_type, enabled=use_cuda):
+            dis_real, _ = self.discriminator(images)
+            dis_fake, _ = self.discriminator(outputs_img.detach())
+
+            dis_real_loss = self.adversarial_loss(dis_real, True, True)
+            dis_fake_loss = self.adversarial_loss(dis_fake, False, True)
+            dis_loss = (dis_real_loss + dis_fake_loss) / 2.0
+
+        self.scaler.scale(dis_loss).backward()
+        self.scaler.step(self.dis_optimizer)
+
+        # -------------------------------------------------------------
+        # 3. Phase 2: Train Generator
+        # -------------------------------------------------------------
+        self.gen_optimizer.zero_grad()
+        with torch.amp.autocast(device_type, enabled=use_cuda):
+            gen_fake, _ = self.discriminator(outputs_img)
+            gen_gan_loss = self.adversarial_loss(gen_fake, True, False) * getattr(self.config, 'INPAINT_ADV_LOSS_WEIGHT', 0.01)
+
+            mask_mean = torch.clamp(torch.mean(masks.float()), min=1e-4)
+            gen_l1_loss = self.l1_loss(outputs_img, images) * getattr(self.config, 'L1_LOSS_WEIGHT', 1.0) / mask_mean
+
+            gen_content_loss = self.perceptual_loss(outputs_img, images) * getattr(self.config, 'CONTENT_LOSS_WEIGHT', 0.1)
+            gen_style_loss = self.style_loss(outputs_img * masks, images * masks) * getattr(self.config, 'STYLE_LOSS_WEIGHT', 250.0)
+
+            gen_tv_loss = self.tv_loss(outputs_img) * getattr(self.config, 'TV_LOSS_WEIGHT', 0.0)
+            gen_bsd_loss = self.bsd_loss(outputs_img, images, masks) * getattr(self.config, 'BSD_LOSS_WEIGHT', 1.0)
+
+            gen_loss = gen_gan_loss + gen_l1_loss + gen_content_loss + gen_style_loss + gen_tv_loss + gen_bsd_loss
+
+        self.scaler.scale(gen_loss).backward()
+        self.scaler.step(self.gen_optimizer)
+        self.scaler.update()
+
+        # Step schedulers
+        self.gen_scheduler.step()
+        self.dis_scheduler.step()
+
+        logs = [
+            ("gLoss", gen_loss.item()),
+            ("dLoss", dis_loss.item()),
+            ("l1", gen_l1_loss.item()),
+            ("style", gen_style_loss.item()),
+            ("content", gen_content_loss.item()),
+            ("bsd", gen_bsd_loss.item())
+        ]
+
+        return outputs_img, gen_loss, dis_loss, logs, gen_gan_loss, gen_l1_loss, gen_content_loss, gen_style_loss
+
+    def backward(self, gen_loss=None, dis_loss=None):
+        """
+        API compatibility stub. Backpropagation and optimizer steps are executed
+        directly inside process() in strict 2-phase sequence.
+        """
+        pass
+
+    def save(self):
+        """
+        Saves generator and discriminator model weights.
+        """
+        save_dir = getattr(self.config, 'PATH', './checkpoints')
+        os.makedirs(save_dir, exist_ok=True)
+        print(f"\n[Checkpoint] Saving model at iteration {self.iteration}...")
+        torch.save({
+            'iteration': self.iteration,
+            'generator': self.generator.state_dict(),
+            'gen_opt': self.gen_optimizer.state_dict()
+        }, self.gen_weights_path)
+
+        torch.save({
+            'discriminator': self.discriminator.state_dict(),
+            'dis_opt': self.dis_optimizer.state_dict()
+        }, self.dis_weights_path)
+
+    def load(self):
+        """
+        Loads pre-trained model weights if checkpoint files exist.
+        """
+        if os.path.exists(self.gen_weights_path):
+            print(f"[Checkpoint] Loading generator from {self.gen_weights_path}...")
+            data = torch.load(self.gen_weights_path, map_location=self.device)
+            self.generator.load_state_dict(data['generator'], strict=False)
+            self.iteration = data.get('iteration', 0)
+
+        if os.path.exists(self.dis_weights_path):
+            print(f"[Checkpoint] Loading discriminator from {self.dis_weights_path}...")
+            data = torch.load(self.dis_weights_path, map_location=self.device)
+            self.discriminator.load_state_dict(data['discriminator'], strict=False)
