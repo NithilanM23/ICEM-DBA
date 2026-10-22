@@ -41,7 +41,8 @@ class ICEM_DBA_InpaintingModel(nn.Module):
             d_state=d_state,
             inner_rank=inner_rank,
             d_key=d_key,
-            use_checkpoint=bool(getattr(config, 'USE_CHECKPOINT', True))
+            use_checkpoint=bool(getattr(config, 'USE_CHECKPOINT', True)),
+            patch_size=getattr(config, 'PATCH_SIZE', 4)
         ).to(self.device)
 
         use_sigmoid = (getattr(config, 'GAN_LOSS', 'lsgan') != 'hinge')

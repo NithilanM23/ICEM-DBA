@@ -26,6 +26,7 @@ D_STATE: 16                       # SSM recurrent hidden state dimension
 INNER_RANK: 32                    # DIG-SM prompt dictionary rank (r)
 D_KEY: 16                         # LC-VER kernel key projection dimension (d_key)
 FFN_EXPANSION_FACTOR: 2           # SEFN Feed-Forward expansion ratio
+PATCH_SIZE: 4                     # Vision Mamba Patch embedding size (256x256 -> 64x64 tokens)
 
 # Ablation Variant Configuration (Section 6.2 of Research Paper)
 # Options:

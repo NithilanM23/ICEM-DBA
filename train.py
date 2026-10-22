@@ -116,6 +116,8 @@ def main():
     accum_steps = int(getattr(config, 'GRAD_ACCUM_STEPS', 1))
     use_checkpoint = bool(getattr(config, 'USE_CHECKPOINT', True))
     effective_batch = batch_size * accum_steps
+    patch_size = int(getattr(config, 'PATCH_SIZE', 4))
+    token_dim = config.INPUT_SIZE // patch_size
 
     print("\n" + "=" * 65)
     print("           ICEM-DBA TRAINING CONFIGURATION SUMMARY")
@@ -124,7 +126,7 @@ def main():
     print(f" Micro-Batch Size:  {batch_size} (distributed across active GPUs)")
     print(f" Effective Batch:   {effective_batch} ({batch_size} micro-batch x {accum_steps} accum steps)")
     print(f" Memory Mode:       Checkpointing: {use_checkpoint} | Allocator: expandable_segments")
-    print(f" Resolution:        {config.INPUT_SIZE}x{config.INPUT_SIZE}")
+    print(f" Resolution:        {config.INPUT_SIZE}x{config.INPUT_SIZE} -> {token_dim}x{token_dim} Tokens ({token_dim * token_dim} tokens/layer)")
     print(f" Learning Rate:     Gen: {config.LR} | Dis: {config.LR * getattr(config, 'D2G_LR', 0.1)}")
     print(f" Checkpoints:       Every {getattr(config, 'SAVE_INTERVAL', 1000)} iterations -> {checkpoint_dir}")
     print(f" Visual Previews:   Every {getattr(config, 'SAMPLE_INTERVAL', 500)} iterations -> {results_dir}")

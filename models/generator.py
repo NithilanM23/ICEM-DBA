@@ -29,11 +29,22 @@ def PositionalEncoding(d_model, max_len=50000, device=None):
 
 class OverlapPatchEmbed(nn.Module):
     """
-    Initial feature embedding: 3x3 Conv projecting (masked_img + mask) to base feature dim.
+    Initial feature embedding: Projects (masked_img + mask) to base feature dim.
+    Supports patch_size 4 (standard Vision Mamba) for O(1) step execution.
     """
-    def __init__(self, in_c=4, embed_dim=48, bias=False):
+    def __init__(self, in_c=4, embed_dim=48, bias=False, patch_size=4):
         super().__init__()
-        self.proj = nn.Conv2d(in_c, embed_dim, kernel_size=3, stride=1, padding=1, bias=bias)
+        self.patch_size = patch_size
+        if patch_size == 4:
+            self.proj = nn.Sequential(
+                nn.Conv2d(in_c, embed_dim // 2, kernel_size=3, stride=2, padding=1, bias=bias),
+                nn.LeakyReLU(0.2, inplace=False),
+                nn.Conv2d(embed_dim // 2, embed_dim, kernel_size=3, stride=2, padding=1, bias=bias)
+            )
+        elif patch_size == 2:
+            self.proj = nn.Conv2d(in_c, embed_dim, kernel_size=3, stride=2, padding=1, bias=bias)
+        else:
+            self.proj = nn.Conv2d(in_c, embed_dim, kernel_size=3, stride=1, padding=1, bias=bias)
 
     def forward(self, x):
         return self.proj(x)
@@ -96,14 +107,16 @@ class ICEM_DBA_Net(nn.Module):
         d_state=16,
         inner_rank=32,
         d_key=16,
-        use_checkpoint=True
+        use_checkpoint=True,
+        patch_size=4
     ):
         super().__init__()
         self.dim = dim
         self.use_checkpoint = use_checkpoint
+        self.patch_size = patch_size
 
         # Patch Embedding
-        self.patch_embed = OverlapPatchEmbed(in_c=inp_channels, embed_dim=dim, bias=bias)
+        self.patch_embed = OverlapPatchEmbed(in_c=inp_channels, embed_dim=dim, bias=bias, patch_size=patch_size)
 
         # ----------------- ENCODER HIERARCHY -----------------
         # Level 1: [B, dim, H, W]
@@ -189,8 +202,22 @@ class ICEM_DBA_Net(nn.Module):
             ) for _ in range(num_refinement_blocks)
         ])
 
-        # Final RGB Output Projection
-        self.output = nn.Conv2d(dim_l2, out_channels, kernel_size=3, stride=1, padding=1, bias=bias)
+        # Final RGB Output Projection (upsamples back to full resolution if patch_size > 1)
+        if patch_size == 4:
+            self.output = nn.Sequential(
+                nn.Conv2d(dim_l2, dim_l2 * 2, kernel_size=3, stride=1, padding=1, bias=bias),
+                nn.PixelShuffle(2),
+                nn.LeakyReLU(0.2, inplace=False),
+                nn.Conv2d(dim_l2 // 2, out_channels * 4, kernel_size=3, stride=1, padding=1, bias=bias),
+                nn.PixelShuffle(2)
+            )
+        elif patch_size == 2:
+            self.output = nn.Sequential(
+                nn.Conv2d(dim_l2, out_channels * 4, kernel_size=3, stride=1, padding=1, bias=bias),
+                nn.PixelShuffle(2)
+            )
+        else:
+            self.output = nn.Conv2d(dim_l2, out_channels, kernel_size=3, stride=1, padding=1, bias=bias)
 
     def _run_stage(self, stage_module, feat, pe, mask):
         """
@@ -208,7 +235,7 @@ class ICEM_DBA_Net(nn.Module):
                 cur = block(cur, pe, mask)
         return {0: cur, 1: pe, 2: mask}
 
-    def forward(self, images, masks, mask_half=None, mask_quarter=None, mask_tiny=None,
+    def forward(self, images, masks, mask1=None, mask2=None, mask3=None, mask4=None,
                 pos1=None, pos2=None, pos3=None, pos4=None, pos1_dec=None):
         """
         images: [B, 3, H, W] input image (masked or clean)
@@ -216,68 +243,76 @@ class ICEM_DBA_Net(nn.Module):
         """
         device = images.device
         B, _, H, W = images.shape
+        ps = getattr(self, 'patch_size', 4)
 
-        # Multi-scale mask interpolation if not explicitly passed
-        if mask_half is None:
-            mask_half = F.interpolate(masks.float(), size=[H // 2, W // 2], mode='nearest')
-        if mask_quarter is None:
-            mask_quarter = F.interpolate(masks.float(), size=[H // 4, W // 4], mode='nearest')
-        if mask_tiny is None:
-            mask_tiny = F.interpolate(masks.float(), size=[H // 8, W // 8], mode='nearest')
+        H1, W1 = H // ps, W // ps
+        H2, W2 = H1 // 2, W1 // 2
+        H3, W3 = H1 // 4, W1 // 4
+        H4, W4 = H1 // 8, W1 // 8
+
+        # Multi-scale mask interpolation
+        if mask1 is None:
+            mask1 = F.interpolate(masks.float(), size=[H1, W1], mode='nearest') if ps > 1 else masks.float()
+        if mask2 is None:
+            mask2 = F.interpolate(masks.float(), size=[H2, W2], mode='nearest')
+        if mask3 is None:
+            mask3 = F.interpolate(masks.float(), size=[H3, W3], mode='nearest')
+        if mask4 is None:
+            mask4 = F.interpolate(masks.float(), size=[H4, W4], mode='nearest')
 
         # Auto-generate positional encodings if not provided
         if pos1 is None:
-            pos1 = PositionalEncoding(self.dim, max_len=H * W, device=device)
+            pos1 = PositionalEncoding(self.dim, max_len=H1 * W1, device=device)
         if pos2 is None:
-            pos2 = PositionalEncoding(self.dim * 2, max_len=(H // 2) * (W // 2), device=device)
+            pos2 = PositionalEncoding(self.dim * 2, max_len=H2 * W2, device=device)
         if pos3 is None:
-            pos3 = PositionalEncoding(self.dim * 4, max_len=(H // 4) * (W // 4), device=device)
+            pos3 = PositionalEncoding(self.dim * 4, max_len=H3 * W3, device=device)
         if pos4 is None:
-            pos4 = PositionalEncoding(self.dim * 8, max_len=(H // 8) * (W // 8), device=device)
+            pos4 = PositionalEncoding(self.dim * 8, max_len=H4 * W4, device=device)
         if pos1_dec is None:
-            pos1_dec = PositionalEncoding(self.dim * 2, max_len=H * W, device=device)
+            pos1_dec = PositionalEncoding(self.dim * 2, max_len=H1 * W1, device=device)
 
-        # 1. Input embedding: masked image concatenated with mask [B, 4, H, W]
+        # 1. Input embedding: masked image concatenated with mask [B, 4, H, W] -> [B, dim, H1, W1]
         masked_img = (images * (1.0 - masks).float()) + masks.float()
         inp = torch.cat([masked_img, masks.float()], dim=1)
         inp_enc1 = self.patch_embed(inp)
 
         # 2. Encoder Level 1
-        out_enc1 = self._run_stage(self.encoder_level1, inp_enc1, pos1, masks)
+        out_enc1 = self._run_stage(self.encoder_level1, inp_enc1, pos1, mask1)
 
         # 3. Encoder Level 2
-        inp_enc2 = self.down1_2(out_enc1[0], masks)
-        out_enc2 = self._run_stage(self.encoder_level2, inp_enc2, pos2, mask_half)
+        inp_enc2 = self.down1_2(out_enc1[0], mask1)
+        out_enc2 = self._run_stage(self.encoder_level2, inp_enc2, pos2, mask2)
 
         # 4. Encoder Level 3
-        inp_enc3 = self.down2_3(out_enc2[0], mask_half)
-        out_enc3 = self._run_stage(self.encoder_level3, inp_enc3, pos3, mask_quarter)
+        inp_enc3 = self.down2_3(out_enc2[0], mask2)
+        out_enc3 = self._run_stage(self.encoder_level3, inp_enc3, pos3, mask3)
 
         # 5. Latent Stage
-        inp_latent = self.down3_4(out_enc3[0], mask_quarter)
-        out_latent = self._run_stage(self.latent, inp_latent, pos4, mask_tiny)
+        inp_latent = self.down3_4(out_enc3[0], mask3)
+        out_latent = self._run_stage(self.latent, inp_latent, pos4, mask4)
 
         # 6. Decoder Level 3
-        inp_dec3 = self.up4_3(out_latent[0], mask_tiny)
+        inp_dec3 = self.up4_3(out_latent[0], mask4)
         inp_dec3 = torch.cat([inp_dec3, out_enc3[0]], dim=1)
         inp_dec3 = self.reduce_chan_level3(inp_dec3)
-        out_dec3 = self._run_stage(self.decoder_level3, inp_dec3, pos3, mask_quarter)
+        out_dec3 = self._run_stage(self.decoder_level3, inp_dec3, pos3, mask3)
 
         # 7. Decoder Level 2
-        inp_dec2 = self.up3_2(out_dec3[0], mask_quarter)
+        inp_dec2 = self.up3_2(out_dec3[0], mask3)
         inp_dec2 = torch.cat([inp_dec2, out_enc2[0]], dim=1)
         inp_dec2 = self.reduce_chan_level2(inp_dec2)
-        out_dec2 = self._run_stage(self.decoder_level2, inp_dec2, pos2, mask_half)
+        out_dec2 = self._run_stage(self.decoder_level2, inp_dec2, pos2, mask2)
 
         # 8. Decoder Level 1
-        inp_dec1 = self.up2_1(out_dec2[0], mask_half)
+        inp_dec1 = self.up2_1(out_dec2[0], mask2)
         inp_dec1 = torch.cat([inp_dec1, out_enc1[0]], dim=1)
-        out_dec1 = self._run_stage(self.decoder_level1, inp_dec1, pos1_dec, masks)
+        out_dec1 = self._run_stage(self.decoder_level1, inp_dec1, pos1_dec, mask1)
 
         # 9. Refinement Stage
-        refined = self._run_stage(self.refinement, out_dec1[0], pos1_dec, masks)
+        refined = self._run_stage(self.refinement, out_dec1[0], pos1_dec, mask1)
 
-        # 10. RGB Output Projection: scaled to [0, 1]
+        # 10. RGB Output Projection: scaled to [0, 1] [B, 3, H, W]
         out_img = self.output(refined[0])
         out_img = (torch.tanh(out_img) + 1.0) / 2.0
         return out_img
