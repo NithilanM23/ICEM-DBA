@@ -133,13 +133,21 @@ def main():
     print(f" Log Frequency:     Every {log_interval} iterations")
     print("=" * 65 + "\n")
 
-    step_start_time = time.time()
+    last_log_time = time.time()
+    last_log_step = 0
     merged = None
+    last_sample_iter = -1
+    last_save_iter = -1
+
+    sample_interval = getattr(config, 'SAMPLE_INTERVAL', 500)
+    save_interval = getattr(config, 'SAVE_INTERVAL', 1000)
 
     keep_training = True
     while keep_training:
         epoch += 1
         print(f"\n>>> Starting Epoch {epoch}...", flush=True)
+        last_log_time = time.time()
+        last_log_step = 0
 
         for step, (images, masks) in enumerate(train_loader, start=1):
             images = images.to(config.DEVICE)
@@ -157,12 +165,18 @@ def main():
                     merged = (outputs_img * masks) + (images * (1.0 - masks))
                     current_psnr = psnr_metric(postprocess(images), postprocess(merged)).item()
 
-                elapsed = time.time() - step_start_time
-                steps_elapsed = log_interval if step > 1 else 1
+                steps_elapsed = step - last_log_step if last_log_step > 0 else 1
+                elapsed = time.time() - last_log_time
                 speed = elapsed / max(1, steps_elapsed)
                 remaining_steps = steps_per_epoch - step
                 eta_secs = int(remaining_steps * speed)
-                eta_str = f"{eta_secs // 60}m {eta_secs % 60:02d}s"
+                if eta_secs >= 3600:
+                    eta_str = f"{eta_secs // 3600}h {(eta_secs % 3600) // 60:02d}m"
+                else:
+                    eta_str = f"{eta_secs // 60}m {eta_secs % 60:02d}s"
+
+                if step == 1 and epoch == 1:
+                    eta_str = "calculating..."
 
                 percent = (step / steps_per_epoch) * 100.0
                 bsd_val = [v for k, v in logs if k == 'bsd']
@@ -177,10 +191,16 @@ def main():
                       f"psnr: {current_psnr:5.2f}dB | "
                       f"{speed:.2f}s/it (ETA: {eta_str})", flush=True)
 
-                step_start_time = time.time()
+                last_log_time = time.time()
+                last_log_step = step
 
             # Sample visual preview
-            if iteration % getattr(config, 'SAMPLE_INTERVAL', 500) == 0 or iteration == 1:
+            should_sample = (
+                (step == 1 and epoch == 1 and last_sample_iter < 0) or
+                (iteration > 0 and iteration % sample_interval == 0 and iteration != last_sample_iter)
+            )
+            if should_sample:
+                last_sample_iter = iteration
                 with torch.no_grad():
                     if merged is None:
                         merged = (outputs_img * masks) + (images * (1.0 - masks))
@@ -197,7 +217,8 @@ def main():
                     print(f"  >>> [Visual Preview] Saved preview image: {sample_path}", flush=True)
 
             # Save checkpoint
-            if iteration % getattr(config, 'SAVE_INTERVAL', 1000) == 0:
+            if iteration > 0 and iteration % save_interval == 0 and iteration != last_save_iter:
+                last_save_iter = iteration
                 model.save()
 
             if iteration >= max_iteration:

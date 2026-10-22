@@ -65,6 +65,6 @@ GAN_LOSS: lsgan                   # Adversarial loss type: lsgan | hinge | nsgan
 # Logging & Checkpointing
 SAVE_INTERVAL: 1000               # Save model checkpoint every N iterations
 SAMPLE_INTERVAL: 500              # Generate sample visual reconstructions every N iterations
-LOG_INTERVAL: 20                  # Print training progress every N iterations
+LOG_INTERVAL: 5                   # Print training progress every N iterations
 SAMPLE_SIZE: 4                    # Number of images to stitch during sampling
 VERBOSE: 1
