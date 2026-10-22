@@ -112,7 +112,7 @@ class DirectionalBoundaryAffinity(nn.Module):
     evaluates directional cosine alignment \kappa_t, and generates state retention modulation.
     Locks state retention along continuous physical contours (jawline, hair flow, architectural lines).
     """
-    def __init__(self, dim, eps=1e-5):
+    def __init__(self, dim, eps=1e-4):
         super().__init__()
         self.dim = dim
         self.eps = eps
@@ -137,8 +137,10 @@ class DirectionalBoundaryAffinity(nn.Module):
         tensor_map: [B, 1, H, W]
         Returns: grad_x, grad_y: [B, 1, H, W]
         """
-        grad_x = F.conv2d(tensor_map, self.sobel_x, padding=1)
-        grad_y = F.conv2d(tensor_map, self.sobel_y, padding=1)
+        sobel_x = self.sobel_x.to(dtype=tensor_map.dtype, device=tensor_map.device)
+        sobel_y = self.sobel_y.to(dtype=tensor_map.dtype, device=tensor_map.device)
+        grad_x = F.conv2d(tensor_map, sobel_x, padding=1)
+        grad_y = F.conv2d(tensor_map, sobel_y, padding=1)
         return grad_x, grad_y
 
     def forward(self, feature_map, distance_map):
@@ -157,6 +159,7 @@ class DirectionalBoundaryAffinity(nn.Module):
         df_norm = torch.sqrt(df_x ** 2 + df_y ** 2 + self.eps)
         
         # 2. Distance field gradients \nabla D(p)
+        distance_map = distance_map.to(dtype=feat_mag.dtype, device=feat_mag.device)
         dd_x, dd_y = self.compute_gradients(distance_map)
         dd_norm = torch.sqrt(dd_x ** 2 + dd_y ** 2 + self.eps)
         
@@ -166,7 +169,7 @@ class DirectionalBoundaryAffinity(nn.Module):
         kappa = torch.clamp(kappa, min=-1.0, max=1.0)
         
         # 4. Continuous SSM Discretization Modulation: 1.0 + tanh(W_align * \kappa)
-        mod_factor = 1.0 + torch.tanh(self.w_align * kappa)
+        mod_factor = 1.0 + torch.tanh(self.w_align.to(feat_mag.dtype) * kappa)
         return kappa, mod_factor
 
 
@@ -245,7 +248,7 @@ class InstanceConditionedExemplarMemory(nn.Module):
         phi_q = F.elu(self.to_q(x_flat)) + 1.0                      # [B, L, d_key]
         
         # O(1) constant-time readout per token
-        denom = torch.bmm(phi_q, z_vis.transpose(1, 2)).clamp(min=1e-5) # [B, L, 1]
+        denom = torch.bmm(phi_q, z_vis.transpose(1, 2)).clamp(min=1e-4) # [B, L, 1]
         exemplar = torch.bmm(phi_q, S_vis) / denom                  # [B, L, C]
 
         # Dynamic distance/confidence-weighted gating \gamma_t
@@ -384,11 +387,13 @@ class GumbelPromptRouter(nn.Module):
         B, L, C = x_seq.shape
         logits = self.router_head(x_seq)  # [B, L, inner_rank]
 
+        # Compute Gumbel-Softmax in float32 to prevent half-precision exp overflow
+        logits_f32 = logits.float()
         if self.training:
-            weights = F.gumbel_softmax(logits, tau=self.temperature, hard=hard, dim=-1)
+            weights = F.gumbel_softmax(logits_f32, tau=self.temperature, hard=hard, dim=-1).to(x_seq.dtype)
         else:
-            weights = F.softmax(logits / self.temperature, dim=-1)
+            weights = F.softmax(logits_f32 / self.temperature, dim=-1).to(x_seq.dtype)
 
         # Token prompt P_dyn = weights @ N_inst: [B, L, r] @ [B, r, d_state] -> [B, L, d_state]
-        P_dyn = torch.bmm(weights, N_inst) * self.prompt_scale
+        P_dyn = torch.bmm(weights, N_inst.to(x_seq.dtype)) * self.prompt_scale.to(x_seq.dtype)
         return P_dyn

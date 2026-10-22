@@ -56,10 +56,10 @@ class ICEM_DBA_InpaintingModel(nn.Module):
             self.discriminator = nn.DataParallel(self.discriminator, gpus)
 
         # Loss Criteria
-        vgg_pretrained = getattr(config, 'VGG_PRETRAINED', True)
+        self.vgg_pretrained = getattr(config, 'VGG_PRETRAINED', True)
         self.l1_loss = nn.L1Loss().to(self.device)
-        self.perceptual_loss = PerceptualLoss(pretrained=vgg_pretrained).to(self.device)
-        self.style_loss = StyleLoss(pretrained=vgg_pretrained).to(self.device)
+        self.perceptual_loss = PerceptualLoss(pretrained=self.vgg_pretrained).to(self.device)
+        self.style_loss = StyleLoss(pretrained=self.vgg_pretrained).to(self.device)
         self.tv_loss = TVLoss().to(self.device)
         self.bsd_loss = BoundarySeamLoss().to(self.device)
         self.adversarial_loss = AdversarialLoss(type=getattr(config, 'GAN_LOSS', 'lsgan')).to(self.device)
@@ -137,8 +137,12 @@ class ICEM_DBA_InpaintingModel(nn.Module):
             mask_mean = torch.clamp(torch.mean(masks.float()), min=1e-4)
             gen_l1_loss = self.l1_loss(outputs_img, images) * getattr(self.config, 'L1_LOSS_WEIGHT', 1.0) / mask_mean
 
-            gen_content_loss = self.perceptual_loss(outputs_img, images) * getattr(self.config, 'CONTENT_LOSS_WEIGHT', 0.1)
-            gen_style_loss = self.style_loss(outputs_img * masks, images * masks) * getattr(self.config, 'STYLE_LOSS_WEIGHT', 250.0)
+            if getattr(self, 'vgg_pretrained', True):
+                gen_content_loss = self.perceptual_loss(outputs_img, images) * getattr(self.config, 'CONTENT_LOSS_WEIGHT', 0.1)
+                gen_style_loss = self.style_loss(outputs_img * masks, images * masks) * getattr(self.config, 'STYLE_LOSS_WEIGHT', 250.0)
+            else:
+                gen_content_loss = torch.tensor(0.0, device=self.device)
+                gen_style_loss = torch.tensor(0.0, device=self.device)
 
             gen_tv_loss = self.tv_loss(outputs_img) * getattr(self.config, 'TV_LOSS_WEIGHT', 0.0)
             gen_bsd_loss = self.bsd_loss(outputs_img, images, masks) * getattr(self.config, 'BSD_LOSS_WEIGHT', 1.0)
