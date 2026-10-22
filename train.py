@@ -1,4 +1,5 @@
 import os
+import time
 import argparse
 import random
 import numpy as np
@@ -101,17 +102,30 @@ def main():
     max_iteration = int(config.MAX_ITERS)
     epoch = 0
 
-    print("\n" + "=" * 50)
-    print("Beginning Training Routine...")
-    print("=" * 50)
+    steps_per_epoch = len(train_loader)
+    log_interval = int(getattr(config, 'LOG_INTERVAL', 20))
+
+    print("\n" + "=" * 65)
+    print("           ICEM-DBA TRAINING CONFIGURATION SUMMARY")
+    print("=" * 65)
+    print(f" Dataset Size:      {len(train_dataset)} images ({steps_per_epoch} batches/epoch)")
+    print(f" Batch Size:        {batch_size} (distributed across active GPUs)")
+    print(f" Resolution:        {config.INPUT_SIZE}x{config.INPUT_SIZE}")
+    print(f" Learning Rate:     Gen: {config.LR} | Dis: {config.LR * getattr(config, 'D2G_LR', 0.1)}")
+    print(f" Checkpoints:       Every {getattr(config, 'SAVE_INTERVAL', 1000)} iterations -> {checkpoint_dir}")
+    print(f" Visual Previews:   Every {getattr(config, 'SAMPLE_INTERVAL', 500)} iterations -> {results_dir}")
+    print(f" Log Frequency:     Every {log_interval} iterations")
+    print("=" * 65 + "\n")
+
+    step_start_time = time.time()
+    merged = None
 
     keep_training = True
     while keep_training:
         epoch += 1
-        print(f"\n--- Epoch: {epoch} ---")
-        progbar = Progbar(len(train_loader), width=25, verbose=config.VERBOSE)
+        print(f"\n>>> Starting Epoch {epoch}...", flush=True)
 
-        for step, (images, masks) in enumerate(train_loader):
+        for step, (images, masks) in enumerate(train_loader, start=1):
             images = images.to(config.DEVICE)
             masks = masks.to(config.DEVICE)
 
@@ -121,17 +135,39 @@ def main():
 
             iteration = model.iteration
 
-            # Evaluate training PSNR
-            with torch.no_grad():
-                merged = (outputs_img * masks) + (images * (1.0 - masks))
-                current_psnr = psnr_metric(postprocess(images), postprocess(merged)).item()
-                logs.append(('psnr', current_psnr))
+            # Clean periodic logging every LOG_INTERVAL steps
+            if step % log_interval == 0 or step == 1 or step == steps_per_epoch:
+                with torch.no_grad():
+                    merged = (outputs_img * masks) + (images * (1.0 - masks))
+                    current_psnr = psnr_metric(postprocess(images), postprocess(merged)).item()
 
-            progbar.add(1, values=logs)
+                elapsed = time.time() - step_start_time
+                steps_elapsed = log_interval if step > 1 else 1
+                speed = elapsed / max(1, steps_elapsed)
+                remaining_steps = steps_per_epoch - step
+                eta_secs = int(remaining_steps * speed)
+                eta_str = f"{eta_secs // 60}m {eta_secs % 60:02d}s"
 
-            # Sample visualization
+                percent = (step / steps_per_epoch) * 100.0
+                bsd_val = [v for k, v in logs if k == 'bsd']
+                bsd_str = f"{bsd_val[0]:.4f}" if bsd_val else "N/A"
+
+                print(f"[Epoch {epoch:2d} | Step {step:4d}/{steps_per_epoch} ({percent:4.1f}%)] "
+                      f"Iter: {iteration:6d} | "
+                      f"gLoss: {gen_loss.item():.4f} | "
+                      f"dLoss: {dis_loss.item():.4f} | "
+                      f"l1: {gen_l1.item():.4f} | "
+                      f"bsd: {bsd_str} | "
+                      f"psnr: {current_psnr:5.2f}dB | "
+                      f"{speed:.2f}s/it (ETA: {eta_str})", flush=True)
+
+                step_start_time = time.time()
+
+            # Sample visual preview
             if iteration % getattr(config, 'SAMPLE_INTERVAL', 500) == 0 or iteration == 1:
                 with torch.no_grad():
+                    if merged is None:
+                        merged = (outputs_img * masks) + (images * (1.0 - masks))
                     inputs_masked = images * (1.0 - masks)
                     grid = stitch_images(
                         postprocess(images),
@@ -142,7 +178,7 @@ def main():
                     )
                     sample_path = os.path.join(results_dir, f"sample_iter_{iteration:07d}.png")
                     grid.save(sample_path)
-                    print(f"\n[Sample] Saved visual preview to {sample_path}")
+                    print(f"  >>> [Visual Preview] Saved preview image: {sample_path}", flush=True)
 
             # Save checkpoint
             if iteration % getattr(config, 'SAVE_INTERVAL', 1000) == 0:
@@ -152,7 +188,7 @@ def main():
                 keep_training = False
                 break
 
-    print("\n[Done] Training completed successfully!")
+    print("\n[Done] Training completed successfully!", flush=True)
 
 if __name__ == '__main__':
     main()
