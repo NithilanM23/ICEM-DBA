@@ -134,6 +134,11 @@ class MambaDispatchModule(nn.Module):
         self.pytorch_mamba = PyTorchSelectiveScan(
             d_model=d_model, d_state=d_state, d_conv=d_conv, expand=expand
         )
+        if not self.use_cuda_kernel and hasattr(torch, 'compile') and torch.cuda.is_available():
+            try:
+                self.pytorch_mamba = torch.compile(self.pytorch_mamba)
+            except Exception:
+                pass
 
     def forward(self, u, P_dyn=None, delta_guide=None):
         """
