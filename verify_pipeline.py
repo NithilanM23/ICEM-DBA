@@ -227,6 +227,8 @@ def test_end_to_end_training_step():
 
     model = ICEM_DBA_InpaintingModel(cfg)
     outputs_img, gen_loss, dis_loss, logs, g_gan, g_l1, g_cnt, g_stl = model.process(images, masks)
+    print(f"  Diagnostics: gen_loss={gen_loss.item():.4f}, dis_loss={dis_loss.item():.4f}")
+    print(f"  Detailed logs: {dict(logs)}")
     assert outputs_img.shape == (B, 3, H, W), "Output image shape error"
     assert not torch.isnan(gen_loss) and gen_loss.item() > 0.0, f"Gen loss invalid: {gen_loss.item()}"
     assert not torch.isnan(dis_loss) and dis_loss.item() > 0.0, f"Dis loss invalid: {dis_loss.item()}"

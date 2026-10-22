@@ -87,10 +87,10 @@ class ICEM_DBA_InpaintingModel(nn.Module):
         self.gen_scheduler = optim.lr_scheduler.MultiStepLR(self.gen_optimizer, milestones=milestones, gamma=gamma)
         self.dis_scheduler = optim.lr_scheduler.MultiStepLR(self.dis_optimizer, milestones=milestones, gamma=gamma)
 
-        # Mixed Precision Scaler
-        use_cuda = torch.cuda.is_available() and ('cuda' in str(self.device))
-        self.device_type = 'cuda' if use_cuda else 'cpu'
-        self.scaler = torch.amp.GradScaler('cuda', enabled=use_cuda)
+        # Mixed Precision Scaler (default disabled for robust FP32 stability)
+        self.use_amp = bool(getattr(config, 'AMP', False)) and torch.cuda.is_available() and ('cuda' in str(self.device))
+        self.device_type = 'cuda' if ('cuda' in str(self.device)) else 'cpu'
+        self.scaler = torch.amp.GradScaler('cuda', enabled=self.use_amp)
 
     def forward(self, images, masks):
         return self.generator(images, masks)
@@ -102,20 +102,20 @@ class ICEM_DBA_InpaintingModel(nn.Module):
         """
         self.iteration += 1
 
-        use_cuda = torch.cuda.is_available() and ('cuda' in str(self.device))
-        device_type = 'cuda' if use_cuda else 'cpu'
+        use_amp = getattr(self, 'use_amp', False)
+        device_type = getattr(self, 'device_type', 'cuda' if ('cuda' in str(self.device)) else 'cpu')
 
         # -------------------------------------------------------------
         # 1. Generator forward pass (initial prediction)
         # -------------------------------------------------------------
-        with torch.amp.autocast(device_type, enabled=use_cuda):
+        with torch.amp.autocast(device_type, enabled=use_amp):
             outputs_img = self(images, masks)
 
         # -------------------------------------------------------------
         # 2. Phase 1: Train Discriminator
         # -------------------------------------------------------------
         self.dis_optimizer.zero_grad()
-        with torch.amp.autocast(device_type, enabled=use_cuda):
+        with torch.amp.autocast(device_type, enabled=use_amp):
             dis_real, _ = self.discriminator(images)
             dis_fake, _ = self.discriminator(outputs_img.detach())
 
@@ -130,7 +130,7 @@ class ICEM_DBA_InpaintingModel(nn.Module):
         # 3. Phase 2: Train Generator
         # -------------------------------------------------------------
         self.gen_optimizer.zero_grad()
-        with torch.amp.autocast(device_type, enabled=use_cuda):
+        with torch.amp.autocast(device_type, enabled=use_amp):
             gen_fake, _ = self.discriminator(outputs_img)
             gen_gan_loss = self.adversarial_loss(gen_fake, True, False) * getattr(self.config, 'INPAINT_ADV_LOSS_WEIGHT', 0.01)
 
@@ -150,13 +150,13 @@ class ICEM_DBA_InpaintingModel(nn.Module):
             gen_loss = gen_gan_loss + gen_l1_loss + gen_content_loss + gen_style_loss + gen_tv_loss + gen_bsd_loss
 
         self.scaler.scale(gen_loss).backward()
-        scale_before = self.scaler.get_scale() if use_cuda else 1.0
+        scale_before = self.scaler.get_scale() if use_amp else 1.0
         self.scaler.step(self.gen_optimizer)
         self.scaler.update()
-        scale_after = self.scaler.get_scale() if use_cuda else 1.0
+        scale_after = self.scaler.get_scale() if use_amp else 1.0
 
         # Step schedulers only if optimizer step was executed
-        if not use_cuda or scale_before <= scale_after:
+        if not use_amp or scale_before <= scale_after:
             self.gen_scheduler.step()
             self.dis_scheduler.step()
 
