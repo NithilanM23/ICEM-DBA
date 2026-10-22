@@ -39,6 +39,8 @@ class PyTorchSelectiveScan(nn.Module):
         )
         self.x_proj = nn.Linear(self.d_inner, self.d_inner // 16 + self.d_state * 2, bias=False)
         self.dt_proj = nn.Linear(self.d_inner // 16, self.d_inner, bias=True)
+        # Initialize dt_proj bias to negative value for stable initialization (~0.05)
+        nn.init.constant_(self.dt_proj.bias, -3.0)
 
         # S4D real initialization for A
         A = torch.arange(1, self.d_state + 1, dtype=torch.float32).repeat(self.d_inner, 1)
@@ -66,33 +68,34 @@ class PyTorchSelectiveScan(nn.Module):
         x_dbl = self.x_proj(x_conv)  # [B, L, dt_rank + 2 * d_state]
         dt_rank = self.d_inner // 16
         dt, B_ssm, C_ssm = torch.split(x_dbl, [dt_rank, self.d_state, self.d_state], dim=-1)
-        dt = F.softplus(self.dt_proj(dt))  # [B, L, d_inner]
+        dt = F.softplus(self.dt_proj(dt)).clamp(min=1e-4, max=5.0)  # [B, L, d_inner]
 
         # --- Component C (DBA-T): Modulate continuous SSM discretization dt ---
         if delta_guide is not None:
             dt = dt * delta_guide  # [B, L, d_inner]
 
-        # Discrete A, B
+        # Discrete A, B computed in float32 for numerical stability in FP16/AMP
+        dt_f = dt.float()
         A = -torch.exp(self.A_log.float())  # [d_inner, d_state]
-        deltaA = torch.exp(torch.einsum('bld,dn->bldn', dt, A))  # [B, L, d_inner, d_state]
-        deltaB_u = torch.einsum('bld,bln,bld->bldn', dt, B_ssm, x_conv)  # [B, L, d_inner, d_state]
+        deltaA = torch.exp(torch.einsum('bld,dn->bldn', dt_f, A).clamp(max=0.0))  # [B, L, d_inner, d_state]
+        deltaB_u = torch.einsum('bld,bln,bld->bldn', dt_f, B_ssm.float(), x_conv.float())  # [B, L, d_inner, d_state]
 
         # --- Component A (DIG-SM): Prompt Injection C_att = C + P_dyn ---
         if P_dyn is not None:
-            C_att = C_ssm + P_dyn  # [B, L, d_state]
+            C_att = (C_ssm + P_dyn).float()  # [B, L, d_state]
         else:
-            C_att = C_ssm
+            C_att = C_ssm.float()
 
-        # Recurrent state propagation
-        h = torch.zeros(B, self.d_inner, self.d_state, device=u.device, dtype=u.dtype)
+        # Recurrent state propagation maintained strictly in float32 to prevent overflow
+        h = torch.zeros(B, self.d_inner, self.d_state, device=u.device, dtype=torch.float32)
         ys = []
         for t in range(L):
             h = deltaA[:, t] * h + deltaB_u[:, t]
             y_t = torch.einsum('bdn,bn->bd', h, C_att[:, t])
             ys.append(y_t)
 
-        y = torch.stack(ys, dim=1)  # [B, L, d_inner]
-        y = y + x_conv * self.D
+        y = torch.stack(ys, dim=1).to(u.dtype)  # [B, L, d_inner]
+        y = y + x_conv * self.D.to(u.dtype)
         y = y * F.silu(z)
         out = self.out_proj(y)  # [B, L, D]
         return out

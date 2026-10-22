@@ -116,14 +116,15 @@ class PerceptualLoss(nn.Module):
         self.weights = weights
 
     def forward(self, x, y):
-        x_vgg, y_vgg = self.vgg(x), self.vgg(y)
-        loss = 0.0
-        loss += self.weights[0] * self.criterion(x_vgg['relu1_1'], y_vgg['relu1_1'])
-        loss += self.weights[1] * self.criterion(x_vgg['relu2_1'], y_vgg['relu2_1'])
-        loss += self.weights[2] * self.criterion(x_vgg['relu3_1'], y_vgg['relu3_1'])
-        loss += self.weights[3] * self.criterion(x_vgg['relu4_1'], y_vgg['relu4_1'])
-        loss += self.weights[4] * self.criterion(x_vgg['relu5_1'], y_vgg['relu5_1'])
-        return loss
+        with torch.amp.autocast('cuda', enabled=False):
+            x_vgg, y_vgg = self.vgg(x.float()), self.vgg(y.float())
+            loss = 0.0
+            loss += self.weights[0] * self.criterion(x_vgg['relu1_1'], y_vgg['relu1_1'])
+            loss += self.weights[1] * self.criterion(x_vgg['relu2_1'], y_vgg['relu2_1'])
+            loss += self.weights[2] * self.criterion(x_vgg['relu3_1'], y_vgg['relu3_1'])
+            loss += self.weights[3] * self.criterion(x_vgg['relu4_1'], y_vgg['relu4_1'])
+            loss += self.weights[4] * self.criterion(x_vgg['relu5_1'], y_vgg['relu5_1'])
+            return loss
 
 
 class StyleLoss(nn.Module):
@@ -139,16 +140,17 @@ class StyleLoss(nn.Module):
         b, ch, h, w = x.size()
         f = x.view(b, ch, w * h)
         f_T = f.transpose(1, 2)
-        return f.bmm(f_T) / (h * w * ch)
+        return f.bmm(f_T) / max(float(h * w * ch), 1.0)
 
     def forward(self, x, y):
-        x_vgg, y_vgg = self.vgg(x), self.vgg(y)
-        loss = 0.0
-        loss += self.criterion(self.compute_gram(x_vgg['relu2_2']), self.compute_gram(y_vgg['relu2_2']))
-        loss += self.criterion(self.compute_gram(x_vgg['relu3_4']), self.compute_gram(y_vgg['relu3_4']))
-        loss += self.criterion(self.compute_gram(x_vgg['relu4_4']), self.compute_gram(y_vgg['relu4_4']))
-        loss += self.criterion(self.compute_gram(x_vgg['relu5_2']), self.compute_gram(y_vgg['relu5_2']))
-        return loss
+        with torch.amp.autocast('cuda', enabled=False):
+            x_vgg, y_vgg = self.vgg(x.float()), self.vgg(y.float())
+            loss = 0.0
+            loss += self.criterion(self.compute_gram(x_vgg['relu2_2']), self.compute_gram(y_vgg['relu2_2']))
+            loss += self.criterion(self.compute_gram(x_vgg['relu3_4']), self.compute_gram(y_vgg['relu3_4']))
+            loss += self.criterion(self.compute_gram(x_vgg['relu4_4']), self.compute_gram(y_vgg['relu4_4']))
+            loss += self.criterion(self.compute_gram(x_vgg['relu5_2']), self.compute_gram(y_vgg['relu5_2']))
+            return loss
 
 
 # =========================================================================

@@ -146,12 +146,15 @@ class ICEM_DBA_InpaintingModel(nn.Module):
             gen_loss = gen_gan_loss + gen_l1_loss + gen_content_loss + gen_style_loss + gen_tv_loss + gen_bsd_loss
 
         self.scaler.scale(gen_loss).backward()
+        scale_before = self.scaler.get_scale() if use_cuda else 1.0
         self.scaler.step(self.gen_optimizer)
         self.scaler.update()
+        scale_after = self.scaler.get_scale() if use_cuda else 1.0
 
-        # Step schedulers
-        self.gen_scheduler.step()
-        self.dis_scheduler.step()
+        # Step schedulers only if optimizer step was executed
+        if not use_cuda or scale_before <= scale_after:
+            self.gen_scheduler.step()
+            self.dis_scheduler.step()
 
         logs = [
             ("gLoss", gen_loss.item()),
