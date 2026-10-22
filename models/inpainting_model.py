@@ -186,28 +186,51 @@ class ICEM_DBA_InpaintingModel(nn.Module):
         save_dir = getattr(self.config, 'PATH', './checkpoints')
         os.makedirs(save_dir, exist_ok=True)
         print(f"\n[Checkpoint] Saving model at iteration {self.iteration}...")
+
+        # Unwrap DataParallel before saving for universal compatibility (single/multi-GPU)
+        gen_state = self.generator.module.state_dict() if isinstance(self.generator, nn.DataParallel) else self.generator.state_dict()
+        dis_state = self.discriminator.module.state_dict() if isinstance(self.discriminator, nn.DataParallel) else self.discriminator.state_dict()
+
         torch.save({
             'iteration': self.iteration,
-            'generator': self.generator.state_dict(),
+            'generator': gen_state,
             'gen_opt': self.gen_optimizer.state_dict()
         }, self.gen_weights_path)
 
         torch.save({
-            'discriminator': self.discriminator.state_dict(),
+            'discriminator': dis_state,
             'dis_opt': self.dis_optimizer.state_dict()
         }, self.dis_weights_path)
+
+        # Milestone snapshot every 5,000 iterations
+        if self.iteration % 5000 == 0:
+            milestone_path = os.path.join(save_dir, f'icem_dba_gen_{self.iteration:07d}.pth')
+            torch.save({
+                'iteration': self.iteration,
+                'generator': gen_state,
+            }, milestone_path)
+            print(f"[Checkpoint] Saved milestone snapshot to {milestone_path}")
 
     def load(self):
         """
         Loads pre-trained model weights if checkpoint files exist.
         """
+        target_gen = self.generator.module if isinstance(self.generator, nn.DataParallel) else self.generator
+        target_dis = self.discriminator.module if isinstance(self.discriminator, nn.DataParallel) else self.discriminator
+
         if os.path.exists(self.gen_weights_path):
             print(f"[Checkpoint] Loading generator from {self.gen_weights_path}...")
             data = torch.load(self.gen_weights_path, map_location=self.device)
-            self.generator.load_state_dict(data['generator'], strict=False)
+            gen_weights = data['generator']
+            # Strip 'module.' prefix if present from previous DataParallel saves
+            gen_weights = {k.replace('module.', ''): v for k, v in gen_weights.items()}
+            target_gen.load_state_dict(gen_weights, strict=False)
             self.iteration = data.get('iteration', 0)
+            print(f"[Checkpoint] Resuming from iteration {self.iteration}")
 
         if os.path.exists(self.dis_weights_path):
             print(f"[Checkpoint] Loading discriminator from {self.dis_weights_path}...")
             data = torch.load(self.dis_weights_path, map_location=self.device)
-            self.discriminator.load_state_dict(data['discriminator'], strict=False)
+            dis_weights = data['discriminator']
+            dis_weights = {k.replace('module.', ''): v for k, v in dis_weights.items()}
+            target_dis.load_state_dict(dis_weights, strict=False)
