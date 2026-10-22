@@ -40,7 +40,8 @@ class ICEM_DBA_InpaintingModel(nn.Module):
             num_refinement_blocks=num_refinement_blocks,
             d_state=d_state,
             inner_rank=inner_rank,
-            d_key=d_key
+            d_key=d_key,
+            use_checkpoint=bool(getattr(config, 'USE_CHECKPOINT', True))
         ).to(self.device)
 
         use_sigmoid = (getattr(config, 'GAN_LOSS', 'lsgan') != 'hinge')
@@ -99,9 +100,11 @@ class ICEM_DBA_InpaintingModel(nn.Module):
     def process(self, images, masks):
         """
         Executes forward pass, evaluates generator and discriminator loss objectives,
-        and executes clean 2-phase optimizer steps.
+        and executes clean 2-phase optimizer steps. Supports gradient accumulation.
         """
-        self.iteration += 1
+        accum_steps = max(1, int(getattr(self.config, 'GRAD_ACCUM_STEPS', 1)))
+        self.accum_counter = getattr(self, 'accum_counter', 0) + 1
+        is_accum_step = (self.accum_counter % accum_steps == 0)
 
         use_amp = getattr(self, 'use_amp', False)
         device_type = getattr(self, 'device_type', 'cuda' if ('cuda' in str(self.device)) else 'cpu')
@@ -115,7 +118,9 @@ class ICEM_DBA_InpaintingModel(nn.Module):
         # -------------------------------------------------------------
         # 2. Phase 1: Train Discriminator
         # -------------------------------------------------------------
-        self.dis_optimizer.zero_grad()
+        if (self.accum_counter - 1) % accum_steps == 0:
+            self.dis_optimizer.zero_grad()
+
         with torch.amp.autocast(device_type, enabled=use_amp):
             dis_real, _ = self.discriminator(images)
             dis_fake, _ = self.discriminator(outputs_img.detach())
@@ -123,14 +128,19 @@ class ICEM_DBA_InpaintingModel(nn.Module):
             dis_real_loss = self.adversarial_loss(dis_real, True, True)
             dis_fake_loss = self.adversarial_loss(dis_fake, False, True)
             dis_loss = (dis_real_loss + dis_fake_loss) / 2.0
+            dis_loss_scaled = dis_loss / float(accum_steps)
 
-        self.scaler.scale(dis_loss).backward()
-        self.scaler.step(self.dis_optimizer)
+        self.scaler.scale(dis_loss_scaled).backward()
+
+        if is_accum_step:
+            self.scaler.step(self.dis_optimizer)
 
         # -------------------------------------------------------------
         # 3. Phase 2: Train Generator
         # -------------------------------------------------------------
-        self.gen_optimizer.zero_grad()
+        if (self.accum_counter - 1) % accum_steps == 0:
+            self.gen_optimizer.zero_grad()
+
         with torch.amp.autocast(device_type, enabled=use_amp):
             gen_fake, _ = self.discriminator(outputs_img)
             gen_gan_loss = self.adversarial_loss(gen_fake, True, False) * getattr(self.config, 'INPAINT_ADV_LOSS_WEIGHT', 0.01)
@@ -149,17 +159,21 @@ class ICEM_DBA_InpaintingModel(nn.Module):
             gen_bsd_loss = self.bsd_loss(outputs_img, images, masks) * getattr(self.config, 'BSD_LOSS_WEIGHT', 1.0)
 
             gen_loss = gen_gan_loss + gen_l1_loss + gen_content_loss + gen_style_loss + gen_tv_loss + gen_bsd_loss
+            gen_loss_scaled = gen_loss / float(accum_steps)
 
-        self.scaler.scale(gen_loss).backward()
-        scale_before = self.scaler.get_scale() if use_amp else 1.0
-        self.scaler.step(self.gen_optimizer)
-        self.scaler.update()
-        scale_after = self.scaler.get_scale() if use_amp else 1.0
+        self.scaler.scale(gen_loss_scaled).backward()
 
-        # Step schedulers only if optimizer step was executed
-        if not use_amp or scale_before <= scale_after:
-            self.gen_scheduler.step()
-            self.dis_scheduler.step()
+        if is_accum_step:
+            self.iteration += 1
+            scale_before = self.scaler.get_scale() if use_amp else 1.0
+            self.scaler.step(self.gen_optimizer)
+            self.scaler.update()
+            scale_after = self.scaler.get_scale() if use_amp else 1.0
+
+            # Step schedulers only if optimizer step was executed
+            if not use_amp or scale_before <= scale_after:
+                self.gen_scheduler.step()
+                self.dis_scheduler.step()
 
         logs = [
             ("gLoss", gen_loss.item()),

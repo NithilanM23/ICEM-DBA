@@ -133,11 +133,15 @@ class ICEM_DBATransformerBlock(nn.Module):
         self.norm2 = LayerNorm(dim, LayerNorm_type)
         self.ffn = FeedForward(dim, ffn_expansion_factor=ffn_expansion_factor, bias=bias)
 
-    def forward(self, x_dict):
+    def forward(self, x, pos=None, mask=None):
         """
-        x_dict: dict with keys {0: x, 1: pos, 2: mask}
+        Supports both direct tensor signature forward(x, pos, mask)
+        and legacy dictionary signature forward({0: x, 1: pos, 2: mask}).
         """
-        x, pos, mask = x_dict[0], x_dict[1], x_dict[2]
+        is_dict = isinstance(x, dict)
+        if is_dict:
+            x, pos, mask = x[0], x[1], x[2]
+
         x_spatial = x
 
         # 1. ICEM-DBA Mamba Layer with Skip Connection
@@ -146,4 +150,6 @@ class ICEM_DBATransformerBlock(nn.Module):
         # 2. Spatially Enhanced Feed-Forward Network with Skip Connection
         x = x + self.ffn(self.norm2(x), x_spatial)
 
-        return {0: x, 1: pos, 2: mask}
+        if is_dict:
+            return {0: x, 1: pos, 2: mask}
+        return x

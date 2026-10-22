@@ -41,7 +41,9 @@ ENABLE_LC_VER: true               # Linear-Complexity Visible Exemplar Readout
 ENABLE_DBA_T: true                # Directional Boundary Affinity Transition
 
 # Optimization & Training
-BATCH_SIZE: 16                    # Scaled for 2x 48GB NVIDIA A40 GPUs (8 per GPU)
+BATCH_SIZE: 4                     # Micro-batch size (2 per GPU across dual A40s)
+GRAD_ACCUM_STEPS: 4               # Gradient accumulation steps (Effective batch size = 4 x 4 = 16)
+USE_CHECKPOINT: true              # Activation checkpointing per block (drops VRAM usage by >80%)
 LR: 0.0001                        # Generator learning rate
 D2G_LR: 0.1                       # Discriminator/Generator learning rate ratio
 BETA1: 0.9                        # Adam optimizer beta1

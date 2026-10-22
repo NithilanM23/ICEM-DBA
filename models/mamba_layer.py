@@ -77,8 +77,12 @@ class PyTorchSelectiveScan(nn.Module):
         # Discrete A, B computed in float32 for numerical stability in FP16/AMP
         dt_f = dt.float()
         A = -torch.exp(self.A_log.float())  # [d_inner, d_state]
-        deltaA = torch.exp(torch.einsum('bld,dn->bldn', dt_f, A).clamp(max=0.0))  # [B, L, d_inner, d_state]
-        deltaB_u = torch.einsum('bld,bln,bld->bldn', dt_f, B_ssm.float(), x_conv.float())  # [B, L, d_inner, d_state]
+        deltaA = torch.exp((dt_f.unsqueeze(-1) * A).clamp(max=0.0))  # [B, L, d_inner, d_state]
+
+        # Memory optimization: avoid materializing full 4D deltaB_u tensor [B, L, d_inner, d_state]
+        # This eliminates gigabytes of VRAM per block during long sequences (L=65,536).
+        u_weighted = dt_f * x_conv.float()  # [B, L, d_inner]
+        B_f = B_ssm.float()                 # [B, L, d_state]
 
         # --- Component A (DIG-SM): Prompt Injection C_att = C + P_dyn ---
         if P_dyn is not None:
@@ -90,7 +94,8 @@ class PyTorchSelectiveScan(nn.Module):
         h = torch.zeros(B, self.d_inner, self.d_state, device=u.device, dtype=torch.float32)
         ys = []
         for t in range(L):
-            h = deltaA[:, t] * h + deltaB_u[:, t]
+            deltaB_u_t = u_weighted[:, t, :, None] * B_f[:, t, None, :]
+            h = deltaA[:, t] * h + deltaB_u_t
             y_t = torch.einsum('bdn,bn->bd', h, C_att[:, t])
             ys.append(y_t)
 

@@ -1,4 +1,5 @@
 import os
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 import time
 import argparse
 import random
@@ -16,6 +17,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Train ICEM-DBA Inpainting Architecture")
     parser.add_argument('--config', type=str, default='./configs/config.yml', help='Path to configuration YAML')
     parser.add_argument('--batch_size', type=int, default=None, help='Override training batch size')
+    parser.add_argument('--grad_accum_steps', type=int, default=None, help='Override gradient accumulation steps')
     parser.add_argument('--lr', type=float, default=None, help='Override generator learning rate')
     parser.add_argument('--max_iters', type=int, default=None, help='Override max iterations')
     parser.add_argument('--input_size', type=int, default=None, help='Override image resolution (e.g. 256)')
@@ -35,6 +37,8 @@ def main():
         os.environ['CUDA_VISIBLE_DEVICES'] = ','.join(str(g) for g in config.GPU)
     if args.batch_size is not None:
         config.BATCH_SIZE = args.batch_size
+    if args.grad_accum_steps is not None:
+        config.GRAD_ACCUM_STEPS = args.grad_accum_steps
     if args.lr is not None:
         config.LR = args.lr
     if args.max_iters is not None:
@@ -105,11 +109,17 @@ def main():
     steps_per_epoch = len(train_loader)
     log_interval = int(getattr(config, 'LOG_INTERVAL', 20))
 
+    accum_steps = int(getattr(config, 'GRAD_ACCUM_STEPS', 1))
+    use_checkpoint = bool(getattr(config, 'USE_CHECKPOINT', True))
+    effective_batch = batch_size * accum_steps
+
     print("\n" + "=" * 65)
     print("           ICEM-DBA TRAINING CONFIGURATION SUMMARY")
     print("=" * 65)
     print(f" Dataset Size:      {len(train_dataset)} images ({steps_per_epoch} batches/epoch)")
-    print(f" Batch Size:        {batch_size} (distributed across active GPUs)")
+    print(f" Micro-Batch Size:  {batch_size} (distributed across active GPUs)")
+    print(f" Effective Batch:   {effective_batch} ({batch_size} micro-batch x {accum_steps} accum steps)")
+    print(f" Memory Mode:       Checkpointing: {use_checkpoint} | Allocator: expandable_segments")
     print(f" Resolution:        {config.INPUT_SIZE}x{config.INPUT_SIZE}")
     print(f" Learning Rate:     Gen: {config.LR} | Dis: {config.LR * getattr(config, 'D2G_LR', 0.1)}")
     print(f" Checkpoints:       Every {getattr(config, 'SAVE_INTERVAL', 1000)} iterations -> {checkpoint_dir}")

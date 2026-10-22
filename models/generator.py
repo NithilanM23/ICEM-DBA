@@ -95,10 +95,12 @@ class ICEM_DBA_Net(nn.Module):
         LayerNorm_type='WithBias',
         d_state=16,
         inner_rank=32,
-        d_key=16
+        d_key=16,
+        use_checkpoint=True
     ):
         super().__init__()
         self.dim = dim
+        self.use_checkpoint = use_checkpoint
 
         # Patch Embedding
         self.patch_embed = OverlapPatchEmbed(in_c=inp_channels, embed_dim=dim, bias=bias)
@@ -190,6 +192,22 @@ class ICEM_DBA_Net(nn.Module):
         # Final RGB Output Projection
         self.output = nn.Conv2d(dim_l2, out_channels, kernel_size=3, stride=1, padding=1, bias=bias)
 
+    def _run_stage(self, stage_module, feat, pe, mask):
+        """
+        Runs a stage of ICEM_DBATransformerBlocks, applying gradient checkpointing
+        per-block during training to drop activation memory by >80%.
+        """
+        cur = feat
+        for block in stage_module:
+            if self.training and getattr(self, 'use_checkpoint', True):
+                cur = torch.utils.checkpoint.checkpoint(
+                    block, cur, pe, mask,
+                    use_reentrant=False
+                )
+            else:
+                cur = block(cur, pe, mask)
+        return {0: cur, 1: pe, 2: mask}
+
     def forward(self, images, masks, mask_half=None, mask_quarter=None, mask_tiny=None,
                 pos1=None, pos2=None, pos3=None, pos4=None, pos1_dec=None):
         """
@@ -225,39 +243,39 @@ class ICEM_DBA_Net(nn.Module):
         inp_enc1 = self.patch_embed(inp)
 
         # 2. Encoder Level 1
-        out_enc1 = self.encoder_level1({0: inp_enc1, 1: pos1, 2: masks})
+        out_enc1 = self._run_stage(self.encoder_level1, inp_enc1, pos1, masks)
 
         # 3. Encoder Level 2
         inp_enc2 = self.down1_2(out_enc1[0], masks)
-        out_enc2 = self.encoder_level2({0: inp_enc2, 1: pos2, 2: mask_half})
+        out_enc2 = self._run_stage(self.encoder_level2, inp_enc2, pos2, mask_half)
 
         # 4. Encoder Level 3
         inp_enc3 = self.down2_3(out_enc2[0], mask_half)
-        out_enc3 = self.encoder_level3({0: inp_enc3, 1: pos3, 2: mask_quarter})
+        out_enc3 = self._run_stage(self.encoder_level3, inp_enc3, pos3, mask_quarter)
 
         # 5. Latent Stage
         inp_latent = self.down3_4(out_enc3[0], mask_quarter)
-        out_latent = self.latent({0: inp_latent, 1: pos4, 2: mask_tiny})
+        out_latent = self._run_stage(self.latent, inp_latent, pos4, mask_tiny)
 
         # 6. Decoder Level 3
         inp_dec3 = self.up4_3(out_latent[0], mask_tiny)
         inp_dec3 = torch.cat([inp_dec3, out_enc3[0]], dim=1)
         inp_dec3 = self.reduce_chan_level3(inp_dec3)
-        out_dec3 = self.decoder_level3({0: inp_dec3, 1: pos3, 2: mask_quarter})
+        out_dec3 = self._run_stage(self.decoder_level3, inp_dec3, pos3, mask_quarter)
 
         # 7. Decoder Level 2
         inp_dec2 = self.up3_2(out_dec3[0], mask_quarter)
         inp_dec2 = torch.cat([inp_dec2, out_enc2[0]], dim=1)
         inp_dec2 = self.reduce_chan_level2(inp_dec2)
-        out_dec2 = self.decoder_level2({0: inp_dec2, 1: pos2, 2: mask_half})
+        out_dec2 = self._run_stage(self.decoder_level2, inp_dec2, pos2, mask_half)
 
         # 8. Decoder Level 1
         inp_dec1 = self.up2_1(out_dec2[0], mask_half)
         inp_dec1 = torch.cat([inp_dec1, out_enc1[0]], dim=1)
-        out_dec1 = self.decoder_level1({0: inp_dec1, 1: pos1_dec, 2: masks})
+        out_dec1 = self._run_stage(self.decoder_level1, inp_dec1, pos1_dec, masks)
 
         # 9. Refinement Stage
-        refined = self.refinement(out_dec1)
+        refined = self._run_stage(self.refinement, out_dec1[0], pos1_dec, masks)
 
         # 10. RGB Output Projection: scaled to [0, 1]
         out_img = self.output(refined[0])
