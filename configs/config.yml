@@ -12,10 +12,10 @@ PATH: ./checkpoints               # Checkpoint directory
 RESULTS: ./results                # Evaluation output directory
 
 # Dataset Paths
-TRAIN_IMAGE_FLIST: ""             # Path to training image folder or .flist
-TRAIN_MASK_FLIST: ""              # Path to training mask folder or .flist
-TEST_IMAGE_FLIST: ""              # Path to testing image folder or .flist
-TEST_MASK_FLIST: ""               # Path to testing mask folder or .flist
+TRAIN_IMAGE_FLIST: "~/datasets/celeba_hq_256/train"   # Path to training image folder or .flist
+TRAIN_MASK_FLIST: ""                                  # Leave empty for procedural irregular masks
+TEST_IMAGE_FLIST: "~/datasets/celeba_hq_256/val"       # Path to testing image folder or .flist
+TEST_MASK_FLIST: ""                                   # Leave empty for procedural irregular masks
 
 # Architecture Hyperparameters
 INPUT_SIZE: 256                   # Input image resolution (256x256)

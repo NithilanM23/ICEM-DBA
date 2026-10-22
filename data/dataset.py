@@ -27,6 +27,8 @@ class InpaintingDataset(Dataset):
     def _load_flist(self, source):
         if not source:
             return []
+        if isinstance(source, str):
+            source = os.path.expanduser(source)
         if isinstance(source, list):
             return source
         if os.path.isfile(source):
