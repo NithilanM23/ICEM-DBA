@@ -81,23 +81,14 @@ class PyTorchSelectiveScan(nn.Module):
         if delta_guide is not None:
             dt = dt * delta_guide  # [B, L, d_inner]
 
-        # Discrete A, B computed in float32 for numerical stability in FP16/AMP
         dt_f = dt.float()
-        A = -torch.exp(self.A_log.float())  # [d_inner, d_state]
-        deltaA = torch.exp((dt_f.unsqueeze(-1) * A).clamp(max=0.0))  # [B, L, d_inner, d_state]
-
-        # Vectorized input-to-state projection: precomputing deltaB_u eliminates 4,096
-        # repetitive CUDA kernel launches and tensor slicing overhead per block.
-        u_weighted = dt_f * x_conv.float()                            # [B, L, d_inner]
-        B_f = B_ssm.float()                                           # [B, L, d_state]
-        deltaB_u = u_weighted.unsqueeze(-1) * B_f.unsqueeze(-2)       # [B, L, d_inner, d_state]
+        B_f = B_ssm.float()
 
         # --- Component A (DIG-SM): Prompt Injection C_att = C + P_dyn ---
         if P_dyn is not None:
             C_att = (C_ssm + P_dyn).float()  # [B, L, d_state]
         else:
             C_att = C_ssm.float()
-        C_exp = C_att.unsqueeze(2)           # [B, L, 1, d_state]
 
         # Fast CUDA kernel dispatch (MambaIRv2 selective_scan_fn integration)
         if HAS_SELECTIVE_SCAN_CUDA and u.is_cuda:
@@ -121,7 +112,13 @@ class PyTorchSelectiveScan(nn.Module):
             except Exception:
                 pass
 
-        # Recurrent state propagation maintained strictly in float32 to prevent overflow
+        # Fallback pure PyTorch recurrent scan (computed strictly in float32 for numerical stability)
+        A = -torch.exp(self.A_log.float())  # [d_inner, d_state]
+        deltaA = torch.exp((dt_f.unsqueeze(-1) * A).clamp(max=0.0))  # [B, L, d_inner, d_state]
+        u_weighted = dt_f * x_conv.float()                            # [B, L, d_inner]
+        deltaB_u = u_weighted.unsqueeze(-1) * B_f.unsqueeze(-2)       # [B, L, d_inner, d_state]
+        C_exp = C_att.unsqueeze(2)                                   # [B, L, 1, d_state]
+
         h = torch.zeros(B, self.d_inner, self.d_state, device=u.device, dtype=torch.float32)
         ys = []
         for t in range(L):
