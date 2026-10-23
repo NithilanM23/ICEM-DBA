@@ -7,6 +7,10 @@ DEFAULT_CONFIG = {
     'GPU': [0],
     'PATH': './checkpoints',
     'RESULTS': './results',
+    'TRAIN_IMAGE_FLIST': './data/train_celebahq.flist',
+    'TRAIN_MASK_FLIST': '',
+    'TEST_IMAGE_FLIST': './data/val_celebahq.flist',
+    'TEST_MASK_FLIST': '',
     'INPUT_SIZE': 256,
     'DIM': 48,
     'NUM_BLOCKS': [4, 6, 6, 8],
@@ -15,14 +19,14 @@ DEFAULT_CONFIG = {
     'INNER_RANK': 32,
     'D_KEY': 16,
     'FFN_EXPANSION_FACTOR': 2,
-    'BATCH_SIZE': 4,
+    'BATCH_SIZE': 16,
     'LR': 0.0001,
     'D2G_LR': 0.1,
     'BETA1': 0.9,
     'BETA2': 0.999,
     'LR_DECAY': 0.5,
-    'MILESTONES': [20000, 40000, 60000, 80000, 120000],
-    'MAX_ITERS': 4000000,
+    'MILESTONES': [60000, 100000, 150000],
+    'MAX_ITERS': 200000,
     'L1_LOSS_WEIGHT': 1.0,
     'STYLE_LOSS_WEIGHT': 250.0,
     'CONTENT_LOSS_WEIGHT': 0.1,
@@ -31,12 +35,13 @@ DEFAULT_CONFIG = {
     'BSD_LOSS_WEIGHT': 1.0,
     'GAN_LOSS': 'lsgan',
     'GRAD_ACCUM_STEPS': 1,
-    'USE_CHECKPOINT': False,
-    'AMP': False,
+    'USE_CHECKPOINT': True,
+    'AMP': True,
+    'NUM_WORKERS': 0,
     'PATCH_SIZE': 4,
-    'SAVE_INTERVAL': 1000,
-    'SAMPLE_INTERVAL': 500,
-    'LOG_INTERVAL': 20,
+    'SAVE_INTERVAL': 500,
+    'SAMPLE_INTERVAL': 250,
+    'LOG_INTERVAL': 5,
     'VERBOSE': 1
 }
 
@@ -45,7 +50,27 @@ class Config(dict):
     def __init__(self, config_path=None, **kwargs):
         super().__init__()
         self._dict = {}
-        if config_path and os.path.exists(config_path):
+        if config_path:
+            if not os.path.exists(config_path):
+                # Auto-resolve common path typos (e.g. ./configs.yml, ./config.yml)
+                repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                candidates = [
+                    os.path.join(repo_root, 'configs', 'config.yml'),
+                    os.path.join(repo_root, 'configs', 'config.yaml'),
+                    os.path.join(repo_root, os.path.basename(config_path)),
+                    os.path.join(repo_root, 'configs', os.path.basename(config_path)),
+                ]
+                resolved = None
+                for c in candidates:
+                    if os.path.exists(c):
+                        resolved = c
+                        print(f"[Config] Notice: '{config_path}' not found, auto-resolved to '{c}'")
+                        break
+                if resolved:
+                    config_path = resolved
+                else:
+                    raise FileNotFoundError(f"[Config Error] Configuration file not found at: '{config_path}'.")
+
             with open(config_path, 'r') as f:
                 loaded = yaml.safe_load(f)
                 if loaded:
