@@ -27,10 +27,17 @@ class InpaintingDataset(Dataset):
     def _load_flist(self, source):
         if not source:
             return []
-        if isinstance(source, str):
-            source = os.path.expanduser(source)
         if isinstance(source, list):
             return source
+        if isinstance(source, str):
+            source = os.path.expanduser(source)
+            if not os.path.exists(source):
+                # Try resolving relative to repository root
+                repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                clean_path = source.lstrip('.').lstrip('/\\')
+                candidate = os.path.join(repo_root, clean_path)
+                if os.path.exists(candidate):
+                    source = candidate
         if os.path.isfile(source):
             if source.endswith('.flist') or source.endswith('.txt'):
                 with open(source, 'r') as f:
@@ -48,7 +55,10 @@ class InpaintingDataset(Dataset):
         return []
 
     def __len__(self):
-        return max(1, len(self.image_files))
+        if len(self.image_files) == 0:
+            # Return enough synthetic samples so DataLoader never drops to 0 batches with drop_last=True
+            return 100
+        return len(self.image_files)
 
     def _generate_procedural_mask(self, h, w):
         """Generates synthetic irregular brush strokes and random block holes."""

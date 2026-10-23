@@ -133,7 +133,26 @@ def main():
             shuffle=True,
             num_workers=0,
             pin_memory=False,
-            drop_last=True
+            drop_last=False if len(train_dataset) < batch_size else True
+        )
+
+    steps_per_epoch = len(train_loader)
+    if steps_per_epoch == 0:
+        train_loader = DataLoader(
+            dataset=train_dataset,
+            batch_size=min(batch_size, max(1, len(train_dataset))),
+            shuffle=True,
+            num_workers=0,
+            pin_memory=False,
+            drop_last=False
+        )
+        steps_per_epoch = len(train_loader)
+
+    if steps_per_epoch == 0:
+        raise RuntimeError(
+            f"\n[FATAL ERROR] DataLoader is empty (0 batches per epoch)!\n"
+            f"Images found: {len(train_dataset.image_files)}. Batch size: {batch_size}.\n"
+            f"Please verify TRAIN_IMAGE_FLIST in configs/config.yml points to valid images or .flist!"
         )
 
     # Model initialization
@@ -145,7 +164,6 @@ def main():
     max_iteration = int(config.MAX_ITERS)
     epoch = 0
 
-    steps_per_epoch = len(train_loader)
     log_interval = int(getattr(config, 'LOG_INTERVAL', 20))
 
     accum_steps = int(getattr(config, 'GRAD_ACCUM_STEPS', 1))
