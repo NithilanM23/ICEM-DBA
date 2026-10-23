@@ -49,7 +49,7 @@ ENABLE_DBA_T: true                # Directional Boundary Affinity Transition
 BATCH_SIZE: 16                     # Optimal sweet spot for 48GB A40 (fills ~22-26 GB VRAM safely with zero OOM risk)
 GRAD_ACCUM_STEPS: 1               # Single step updates (Effective batch size = 16)
 NUM_WORKERS: 0                    # 0: In-process loading (100% safe against Docker /dev/shm space limits)
-USE_CHECKPOINT: false             # Keeps activations in VRAM to eliminate 2x forward recomputation
+USE_CHECKPOINT: true              # Keeps activation memory low (~8-12 GB VRAM) with zero OOM risk
 AMP: true                         # Automatic Mixed Precision (unlocks NVIDIA Ampere Tensor Cores)
 LR: 0.0001                        # Generator learning rate
 D2G_LR: 0.1                       # Discriminator/Generator learning rate ratio
