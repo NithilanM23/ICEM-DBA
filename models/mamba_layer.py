@@ -17,6 +17,34 @@ except (ImportError, Exception):
     selective_scan_fn = None
     HAS_SELECTIVE_SCAN_CUDA = False
 
+def parallel_associative_scan(a, b):
+    """
+    Solves linear recurrence h_t = a_t * h_{t-1} + b_t (h_0 = 0)
+    in O(log2(L)) parallel steps instead of O(L) sequential Python iterations.
+    Eliminates the 4,096-step autograd graph unrolling bottleneck.
+    a: [B, L, d_inner, d_state]
+    b: [B, L, d_inner, d_state]
+    Returns: h [B, L, d_inner, d_state]
+    """
+    B, L, d_inner, d_state = a.shape
+    curr_a = a
+    curr_b = b
+    stride = 1
+    while stride < L:
+        a_left = curr_a[:, :-stride]
+        b_left = curr_b[:, :-stride]
+        a_right = curr_a[:, stride:]
+        b_right = curr_b[:, stride:]
+
+        new_a_right = a_right * a_left
+        new_b_right = a_right * b_left + b_right
+
+        curr_a = torch.cat([curr_a[:, :stride], new_a_right], dim=1)
+        curr_b = torch.cat([curr_b[:, :stride], new_b_right], dim=1)
+        stride *= 2
+    return curr_b
+
+
 # =========================================================================
 # Pure PyTorch Selective Scan with DIG-SM (C + P_dyn) and DBA-T (dt * guide)
 # =========================================================================
@@ -99,10 +127,11 @@ class PyTorchSelectiveScan(nn.Module):
                 Bs = B_f.transpose(1, 2).unsqueeze(1).contiguous()   # [B, 1, d_state, L]
                 Cs = C_att.transpose(1, 2).unsqueeze(1).contiguous() # [B, 1, d_state, L]
                 Ds = self.D.float().contiguous()
+                delta_bias = torch.zeros(self.d_inner, device=u.device, dtype=torch.float32)
 
                 out_y = selective_scan_fn(
                     xs, dts, As, Bs, Cs, Ds, z=None,
-                    delta_bias=None, delta_softplus=False, return_last_state=False
+                    delta_bias=delta_bias, delta_softplus=False, return_last_state=False
                 )
                 if out_y.dim() == 4:
                     out_y = out_y.squeeze(1)
@@ -112,23 +141,20 @@ class PyTorchSelectiveScan(nn.Module):
             except Exception:
                 pass
 
-        # Fallback pure PyTorch recurrent scan (computed strictly in float32 for numerical stability)
-        A = -torch.exp(self.A_log.float())  # [d_inner, d_state]
-        deltaA = torch.exp((dt_f.unsqueeze(-1) * A).clamp(max=0.0))  # [B, L, d_inner, d_state]
+        # Parallel Associative Scan Fallback: Solves linear recurrence h_t = a_t * h_{t-1} + b_t
+        # in log2(L) parallel steps, completely eliminating the 4,096-step autograd graph bottleneck!
+        A = -torch.exp(self.A_log.float())                            # [d_inner, d_state]
+        log_a = (dt_f.unsqueeze(-1) * A).clamp(max=0.0)
+        a = torch.exp(log_a)                                          # [B, L, d_inner, d_state]
         u_weighted = dt_f * x_conv.float()                            # [B, L, d_inner]
-        deltaB_u = u_weighted.unsqueeze(-1) * B_f.unsqueeze(-2)       # [B, L, d_inner, d_state]
+        b = u_weighted.unsqueeze(-1) * B_f.unsqueeze(-2)              # [B, L, d_inner, d_state]
         C_exp = C_att.unsqueeze(2)                                   # [B, L, 1, d_state]
 
-        h = torch.zeros(B, self.d_inner, self.d_state, device=u.device, dtype=torch.float32)
-        ys = []
-        for t in range(L):
-            h = deltaA[:, t] * h + deltaB_u[:, t]
-            ys.append((h * C_exp[:, t]).sum(dim=-1))
-
-        y = torch.stack(ys, dim=1).to(u.dtype)  # [B, L, d_inner]
+        h = parallel_associative_scan(a, b)                           # [B, L, d_inner, d_state]
+        y = (h * C_exp).sum(dim=-1).to(u.dtype)                       # [B, L, d_inner]
         y = y + x_conv * self.D.to(u.dtype)
         y = y * F.silu(z)
-        out = self.out_proj(y)  # [B, L, D]
+        out = self.out_proj(y)                                        # [B, L, D]
         return out
 
 
@@ -160,11 +186,6 @@ class MambaDispatchModule(nn.Module):
         self.pytorch_mamba = PyTorchSelectiveScan(
             d_model=d_model, d_state=d_state, d_conv=d_conv, expand=expand
         )
-        if not self.use_cuda_kernel and hasattr(torch, 'compile') and torch.cuda.is_available():
-            try:
-                self.pytorch_mamba = torch.compile(self.pytorch_mamba)
-            except Exception:
-                pass
 
     def forward(self, u, P_dyn=None, delta_guide=None):
         """

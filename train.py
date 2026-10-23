@@ -166,10 +166,15 @@ def main():
     while keep_training:
         epoch += 1
         print(f"\n>>> Starting Epoch {epoch}/{total_epochs}...", flush=True)
+        if epoch == 1:
+            print("    [Pipeline] Fetching initial training batch from DataLoader...", flush=True)
         last_log_time = time.time()
         last_log_step = 0
 
         for step, (images, masks) in enumerate(train_loader, start=1):
+            if step == 1 and epoch == 1:
+                print("    [Pipeline] Initial batch loaded! Starting forward & backward optimization...", flush=True)
+
             images = images.to(config.DEVICE)
             masks = masks.to(config.DEVICE)
 
