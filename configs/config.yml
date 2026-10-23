@@ -50,7 +50,7 @@ BATCH_SIZE: 16                     # Optimal sweet spot for 48GB A40 (fills ~22-
 GRAD_ACCUM_STEPS: 1               # Single step updates (Effective batch size = 16)
 NUM_WORKERS: 0                    # 0: In-process loading (100% safe against Docker /dev/shm space limits)
 USE_CHECKPOINT: true              # Keeps activation memory low (~8-12 GB VRAM) with zero OOM risk
-AMP: true                         # Automatic Mixed Precision (unlocks NVIDIA Ampere Tensor Cores)
+AMP: false                        # Full FP32 precision (guarantees zero NaN / zero overflow on 48GB A40)
 LR: 0.0001                        # Generator learning rate
 D2G_LR: 0.1                       # Discriminator/Generator learning rate ratio
 BETA1: 0.9                        # Adam optimizer beta1

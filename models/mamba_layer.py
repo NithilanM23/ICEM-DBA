@@ -52,11 +52,13 @@ class FastRecurrentScan(torch.autograd.Function):
         dh = torch.zeros(B, d_inner, d_state, device=a.device, dtype=torch.float32)
 
         for t in range(L - 1, -1, -1):
-            dh = dh + grad_out[:, t]
-            grad_b[:, t] = dh
+            dh = dh + grad_out[:, t].float()
+            # Gradient stabilization: clamp intermediate backprop adjoint state to prevent compounding across 4096 steps
+            dh = torch.clamp(dh, min=-10.0, max=10.0)
+            grad_b[:, t] = dh.to(grad_out.dtype)
             h_prev = h_out[:, t - 1] if t > 0 else torch.zeros_like(dh)
-            grad_a[:, t] = dh * h_prev
-            dh = a[:, t] * dh
+            grad_a[:, t] = torch.clamp(dh * h_prev, min=-10.0, max=10.0).to(a.dtype)
+            dh = a[:, t].float() * dh
 
         return grad_a, grad_b
 

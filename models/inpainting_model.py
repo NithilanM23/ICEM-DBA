@@ -142,6 +142,9 @@ class ICEM_DBA_InpaintingModel(nn.Module):
         self.scaler.scale(dis_loss_scaled).backward()
 
         if is_accum_step:
+            if use_amp:
+                self.scaler.unscale_(self.dis_optimizer)
+            torch.nn.utils.clip_grad_norm_(self.discriminator.parameters(), max_norm=1.0)
             self.scaler.step(self.dis_optimizer)
 
         # -------------------------------------------------------------
@@ -154,7 +157,7 @@ class ICEM_DBA_InpaintingModel(nn.Module):
             gen_fake, _ = self.discriminator(outputs_img)
             gen_gan_loss = self.adversarial_loss(gen_fake, True, False) * getattr(self.config, 'INPAINT_ADV_LOSS_WEIGHT', 0.01)
 
-            mask_mean = torch.clamp(torch.mean(masks.float()), min=1e-4)
+            mask_mean = torch.clamp(torch.mean(masks.float()), min=0.1)
             gen_l1_loss = self.l1_loss(outputs_img, images) * getattr(self.config, 'L1_LOSS_WEIGHT', 1.0) / mask_mean
 
             if getattr(self, 'vgg_pretrained', True):
@@ -174,6 +177,9 @@ class ICEM_DBA_InpaintingModel(nn.Module):
 
         if is_accum_step:
             self.iteration += 1
+            if use_amp:
+                self.scaler.unscale_(self.gen_optimizer)
+            torch.nn.utils.clip_grad_norm_(self.generator.parameters(), max_norm=1.0)
             scale_before = self.scaler.get_scale() if use_amp else 1.0
             self.scaler.step(self.gen_optimizer)
             self.scaler.update()

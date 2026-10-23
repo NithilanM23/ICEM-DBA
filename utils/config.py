@@ -36,7 +36,7 @@ DEFAULT_CONFIG = {
     'GAN_LOSS': 'lsgan',
     'GRAD_ACCUM_STEPS': 1,
     'USE_CHECKPOINT': True,
-    'AMP': True,
+    'AMP': False,
     'NUM_WORKERS': 0,
     'PATCH_SIZE': 4,
     'SAVE_INTERVAL': 500,
