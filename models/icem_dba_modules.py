@@ -7,28 +7,30 @@ import math
 # Geodesic Distance Map Calculator
 # =========================================================================
 
-def get_distance_map(mask, max_iters=128):
+def get_distance_map(mask, max_iters=None):
     r"""
     Computes both:
     1. dist_priority: [B, 1, H, W] inverse distance confidence (1.0 at boundary -> 0.0 at center)
        used to enforce MACG traversal: Known -> Boundary Fringe -> Hole Center.
     2. dist_physical: [B, 1, H, W] physical geodesic distance (0.0 at boundary -> 1.0 at center)
        whose 2D spatial gradient \nabla D points inward into the hole (used for DBA-T).
+    Eliminates GPU-CPU blocking synchronization (known.min() == 1.0) to maintain high CUDA throughput.
     """
     B, C, H, W = mask.shape
+    if max_iters is None:
+        max_iters = min(32, max(4, max(H, W) // 2))
+
     dist_from_edge = torch.zeros_like(mask, dtype=torch.float32)
     known = 1.0 - mask
     
     for i in range(1, max_iters + 1):
         next_known = F.max_pool2d(known, kernel_size=3, stride=1, padding=1)
         new_pixels = next_known - known
-        dist_from_edge += new_pixels * float(i)
+        dist_from_edge = dist_from_edge + new_pixels * float(i)
         known = next_known
-        if known.min() == 1.0:
-            break
             
     unreached = 1.0 - known
-    dist_from_edge += unreached * float(max_iters + 1)
+    dist_from_edge = dist_from_edge + unreached * float(max_iters + 1)
     
     max_dist = dist_from_edge.view(B, -1).max(dim=1, keepdim=True)[0].view(B, 1, 1, 1)
     max_dist = torch.clamp(max_dist, min=1.0)
@@ -303,14 +305,31 @@ class MACGPathfinder(nn.Module):
 
         distance_map = None
         if mask is not None:
-            if patch_size > 1:
-                mask_pooled = F.max_pool2d(
-                    mask.float(), kernel_size=patch_size, stride=patch_size
-                )
+            # Multi-scale distance cache on mask tensor avoids recomputing 88 times across 44 blocks per step
+            cache = getattr(mask, '_dist_cache', None)
+            if cache is None:
+                cache = {}
+                try:
+                    setattr(mask, '_dist_cache', cache)
+                except Exception:
+                    pass
+
+            cache_key = (H, W, patch_size)
+            if cache is not None and cache_key in cache:
+                dist_priority_pooled, distance_map, mask_pooled = cache[cache_key]
             else:
-                mask_pooled = mask.float()
-                
-            dist_priority_pooled, _ = get_distance_map(mask_pooled)  # [B, 1, H_p, W_p]
+                if patch_size > 1:
+                    mask_pooled = F.max_pool2d(
+                        mask.float(), kernel_size=patch_size, stride=patch_size
+                    )
+                else:
+                    mask_pooled = mask.float()
+                    
+                dist_priority_pooled, _ = get_distance_map(mask_pooled)  # [B, 1, H_p, W_p]
+                _, distance_map = get_distance_map(mask.float())
+                if cache is not None:
+                    cache[cache_key] = (dist_priority_pooled, distance_map, mask_pooled)
+
             dist_squeezed = dist_priority_pooled.squeeze(1)
             mask_squeezed = mask_pooled.squeeze(1)
 
@@ -321,9 +340,6 @@ class MACGPathfinder(nn.Module):
             texture_scores = score_map * 1.0
 
             final_scores = known_boost + spiral_boost + texture_scores
-            
-            # Compute full resolution physical distance map for DBA-T gradient computation
-            _, distance_map = get_distance_map(mask.float())
         else:
             final_scores = score_map
             distance_map = torch.zeros(B, 1, H, W, device=x.device, dtype=x.dtype)

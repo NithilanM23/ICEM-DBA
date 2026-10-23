@@ -109,9 +109,9 @@ class PerceptualLoss(nn.Module):
     """
     VGG-based perceptual feature matching loss.
     """
-    def __init__(self, weights=[1.0, 1.0, 1.0, 1.0, 1.0], pretrained=True):
+    def __init__(self, weights=[1.0, 1.0, 1.0, 1.0, 1.0], pretrained=True, vgg=None):
         super().__init__()
-        self.vgg = VGG19(pretrained=pretrained)
+        self.vgg = vgg if vgg is not None else VGG19(pretrained=pretrained)
         self.criterion = nn.L1Loss()
         self.weights = weights
 
@@ -131,9 +131,9 @@ class StyleLoss(nn.Module):
     """
     Gram matrix feature correlation loss for texture synthesis.
     """
-    def __init__(self, pretrained=True):
+    def __init__(self, pretrained=True, vgg=None):
         super().__init__()
-        self.vgg = VGG19(pretrained=pretrained)
+        self.vgg = vgg if vgg is not None else VGG19(pretrained=pretrained)
         self.criterion = nn.L1Loss()
 
     def compute_gram(self, x):

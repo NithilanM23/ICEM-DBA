@@ -42,17 +42,21 @@ ENABLE_LC_VER: true               # Linear-Complexity Visible Exemplar Readout
 ENABLE_DBA_T: true                # Directional Boundary Affinity Transition
 
 # Optimization & Training
-BATCH_SIZE: 8                     # Micro-batch size (8 images per step)
-GRAD_ACCUM_STEPS: 2               # Gradient accumulation (Effective batch size = 8 x 2 = 16)
-NUM_WORKERS: 2                    # DataLoader workers (Docker /dev/shm safe)
-USE_CHECKPOINT: false             # Disable checkpointing: keeps activations in VRAM (~18-22GB) to eliminate 2x forward recomputation
+# Hardware Profiles:
+#   - A40 Mode (48GB VRAM): BATCH_SIZE: 24, GRAD_ACCUM_STEPS: 1, AMP: true (uses ~24-28 GB VRAM, finishes in ~2.5 hrs)
+#   - 8GB Mode (RTX 5060): BATCH_SIZE: 8, GRAD_ACCUM_STEPS: 2, AMP: false, USE_CHECKPOINT: true (uses ~6-7 GB VRAM)
+BATCH_SIZE: 24                     # Scaled for 48GB A40 (fills ~24-28 GB VRAM)
+GRAD_ACCUM_STEPS: 1               # Single step updates (Effective batch size = 24)
+NUM_WORKERS: 4                    # DataLoader workers (prevents GPU starvation from procedural PIL masks)
+USE_CHECKPOINT: false             # Keeps activations in VRAM to eliminate 2x forward recomputation
+AMP: true                         # Automatic Mixed Precision (unlocks NVIDIA Ampere Tensor Cores)
 LR: 0.0001                        # Generator learning rate
 D2G_LR: 0.1                       # Discriminator/Generator learning rate ratio
 BETA1: 0.9                        # Adam optimizer beta1
 BETA2: 0.999                      # Adam optimizer beta2
 LR_DECAY: 0.5                     # Multi-step LR decay factor
-MILESTONES: [20000, 40000, 60000, 80000, 120000]
-MAX_ITERS: 4000000                # Total training iterations
+MILESTONES: [60000, 100000, 150000] # Decays aligned with 200k iterations
+MAX_ITERS: 200000                 # Total iterations (~171 epochs on CelebA-HQ; finishes in 2-3 hours instead of 3 days!)
 
 # Loss Function Weights
 L1_LOSS_WEIGHT: 1.0               # L1 reconstruction loss weight (normalized by mask area)

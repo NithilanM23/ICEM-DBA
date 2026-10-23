@@ -30,6 +30,10 @@ DEFAULT_CONFIG = {
     'TV_LOSS_WEIGHT': 0.0,
     'BSD_LOSS_WEIGHT': 1.0,
     'GAN_LOSS': 'lsgan',
+    'GRAD_ACCUM_STEPS': 1,
+    'USE_CHECKPOINT': False,
+    'AMP': False,
+    'PATCH_SIZE': 4,
     'SAVE_INTERVAL': 1000,
     'SAMPLE_INTERVAL': 500,
     'LOG_INTERVAL': 20,
@@ -58,7 +62,7 @@ class Config(dict):
             return self._dict[name]
         if name in DEFAULT_CONFIG:
             return DEFAULT_CONFIG[name]
-        return None
+        raise AttributeError(f"'Config' object has no attribute '{name}'")
 
     def __setattr__(self, name, value):
         if name.startswith('_'):

@@ -66,9 +66,11 @@ class ICEM_DBA_InpaintingModel(nn.Module):
 
         # Loss Criteria
         self.vgg_pretrained = getattr(config, 'VGG_PRETRAINED', True)
+        from .loss import VGG19
+        self.shared_vgg = VGG19(pretrained=self.vgg_pretrained).to(self.device) if self.vgg_pretrained else None
         self.l1_loss = nn.L1Loss().to(self.device)
-        self.perceptual_loss = PerceptualLoss(pretrained=self.vgg_pretrained).to(self.device)
-        self.style_loss = StyleLoss(pretrained=self.vgg_pretrained).to(self.device)
+        self.perceptual_loss = PerceptualLoss(pretrained=self.vgg_pretrained, vgg=self.shared_vgg).to(self.device)
+        self.style_loss = StyleLoss(pretrained=self.vgg_pretrained, vgg=self.shared_vgg).to(self.device)
         self.tv_loss = TVLoss().to(self.device)
         self.bsd_loss = BoundarySeamLoss().to(self.device)
         self.adversarial_loss = AdversarialLoss(type=getattr(config, 'GAN_LOSS', 'lsgan')).to(self.device)
