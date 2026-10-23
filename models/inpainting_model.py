@@ -234,6 +234,33 @@ class ICEM_DBA_InpaintingModel(nn.Module):
             }, milestone_path)
             print(f"[Checkpoint] Saved milestone snapshot to {milestone_path}")
 
+    def save_best(self, psnr):
+        """
+        Saves the best-performing model weights snapshot based on peak PSNR metric.
+        """
+        save_dir = getattr(self.config, 'PATH', './checkpoints')
+        os.makedirs(save_dir, exist_ok=True)
+        best_gen_path = os.path.join(save_dir, 'icem_dba_gen_best.pth')
+        best_dis_path = os.path.join(save_dir, 'icem_dba_dis_best.pth')
+
+        gen_state = self.generator.module.state_dict() if isinstance(self.generator, nn.DataParallel) else self.generator.state_dict()
+        dis_state = self.discriminator.module.state_dict() if isinstance(self.discriminator, nn.DataParallel) else self.discriminator.state_dict()
+
+        torch.save({
+            'iteration': self.iteration,
+            'psnr': float(psnr),
+            'generator': gen_state,
+            'gen_opt': self.gen_optimizer.state_dict()
+        }, best_gen_path)
+
+        torch.save({
+            'iteration': self.iteration,
+            'psnr': float(psnr),
+            'discriminator': dis_state,
+            'dis_opt': self.dis_optimizer.state_dict()
+        }, best_dis_path)
+        print(f"  >>> [Best Model] New highest PSNR: {psnr:.2f}dB! Saved {best_gen_path}", flush=True)
+
     def load(self):
         """
         Loads pre-trained model weights if checkpoint files exist.

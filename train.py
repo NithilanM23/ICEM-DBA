@@ -1,6 +1,7 @@
 import os
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 import time
+import math
 import argparse
 import random
 import numpy as np
@@ -149,14 +150,22 @@ def main():
     merged = None
     last_sample_iter = -1
     last_save_iter = -1
+    best_psnr = -1.0
 
     sample_interval = getattr(config, 'SAMPLE_INTERVAL', 500)
     save_interval = getattr(config, 'SAVE_INTERVAL', 1000)
+    total_epochs = math.ceil(max_iteration / max(1, steps_per_epoch))
+
+    # Metric CSV logger for plotting loss curves and evaluation history
+    csv_log_path = os.path.join(checkpoint_dir, 'training_metrics.csv')
+    if not os.path.exists(csv_log_path):
+        with open(csv_log_path, 'w') as f:
+            f.write('epoch,step,iteration,gLoss,dLoss,l1,bsd,psnr,best_psnr,sec_per_it\n')
 
     keep_training = True
     while keep_training:
         epoch += 1
-        print(f"\n>>> Starting Epoch {epoch}...", flush=True)
+        print(f"\n>>> Starting Epoch {epoch}/{total_epochs}...", flush=True)
         last_log_time = time.time()
         last_log_step = 0
 
@@ -186,21 +195,45 @@ def main():
                 else:
                     eta_str = f"{eta_secs // 60}m {eta_secs % 60:02d}s"
 
+                # Global total ETA across all epochs
+                remaining_total = max(0, max_iteration - iteration)
+                total_eta_secs = int(remaining_total * speed)
+                if total_eta_secs >= 3600:
+                    total_eta_str = f"{total_eta_secs // 3600}h {(total_eta_secs % 3600) // 60:02d}m"
+                else:
+                    total_eta_str = f"{total_eta_secs // 60}m {total_eta_secs % 60:02d}s"
+
                 if step == 1 and epoch == 1:
                     eta_str = "calculating..."
+                    total_eta_str = "calculating..."
 
                 percent = (step / steps_per_epoch) * 100.0
                 bsd_val = [v for k, v in logs if k == 'bsd']
                 bsd_str = f"{bsd_val[0]:.4f}" if bsd_val else "N/A"
 
-                print(f"[Epoch {epoch:2d} | Step {step:4d}/{steps_per_epoch} ({percent:4.1f}%)] "
-                      f"Iter: {iteration:6d} | "
+                # Check and save best model snapshot based on PSNR
+                if current_psnr > best_psnr and iteration > 50:
+                    best_psnr = current_psnr
+                    model.save_best(best_psnr)
+
+                best_str = f"{best_psnr:5.2f}dB" if best_psnr > 0 else "N/A"
+
+                print(f"[Epoch {epoch:2d}/{total_epochs:2d} | Step {step:4d}/{steps_per_epoch} ({percent:4.1f}%)] "
+                      f"Iter: {iteration:6d}/{max_iteration} | "
                       f"gLoss: {gen_loss.item():.4f} | "
                       f"dLoss: {dis_loss.item():.4f} | "
                       f"l1: {gen_l1.item():.4f} | "
                       f"bsd: {bsd_str} | "
-                      f"psnr: {current_psnr:5.2f}dB | "
-                      f"{speed:.2f}s/it (ETA: {eta_str})", flush=True)
+                      f"psnr: {current_psnr:5.2f}dB (Best: {best_str}) | "
+                      f"{speed:.3f}s/it | "
+                      f"ETA: {eta_str} (Total: {total_eta_str})", flush=True)
+
+                # Append metrics to CSV for persistent curve plotting
+                try:
+                    with open(csv_log_path, 'a') as f:
+                        f.write(f"{epoch},{step},{iteration},{gen_loss.item():.4f},{dis_loss.item():.4f},{gen_l1.item():.4f},{bsd_str},{current_psnr:.2f},{best_psnr:.2f},{speed:.4f}\n")
+                except Exception:
+                    pass
 
                 last_log_time = time.time()
                 last_log_step = step

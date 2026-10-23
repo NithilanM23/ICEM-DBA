@@ -69,8 +69,8 @@ BSD_LOSS_WEIGHT: 1.0              # Boundary Seam Discrepancy loss weight
 GAN_LOSS: lsgan                   # Adversarial loss type: lsgan | hinge | nsgan
 
 # Logging & Checkpointing
-SAVE_INTERVAL: 1000               # Save model checkpoint every N iterations
-SAMPLE_INTERVAL: 500              # Generate sample visual reconstructions every N iterations
-LOG_INTERVAL: 5                   # Print training progress every N iterations
+SAVE_INTERVAL: 500                # Save latest model checkpoint (icem_dba_gen.pth) every 500 steps (~15s)
+SAMPLE_INTERVAL: 250              # Generate sample visual reconstructions (4-column grid) every 250 steps (~8s)
+LOG_INTERVAL: 5                   # Print training progress every 5 iterations
 SAMPLE_SIZE: 4                    # Number of images to stitch during sampling
 VERBOSE: 1
