@@ -7,7 +7,7 @@
 # Mode & Hardware
 MODE: 1                           # 1: train, 2: test, 3: eval
 SEED: 10                          # Random seed
-GPU: [0]                          # Primary NVIDIA A40 GPU (48GB VRAM)
+GPU: [1]                          # Primary NVIDIA A40 GPU (48GB VRAM)
 PATH: ./checkpoints               # Checkpoint directory
 RESULTS: ./results                # Evaluation output directory
 
@@ -48,7 +48,7 @@ ENABLE_DBA_T: true                # Directional Boundary Affinity Transition
 #   - 8GB Mode (RTX 5060): BATCH_SIZE: 8, GRAD_ACCUM_STEPS: 2, AMP: false, USE_CHECKPOINT: true (uses ~6-7 GB VRAM)
 BATCH_SIZE: 16                     # Optimal sweet spot for 48GB A40 (fills ~22-26 GB VRAM safely with zero OOM risk)
 GRAD_ACCUM_STEPS: 1               # Single step updates (Effective batch size = 16)
-NUM_WORKERS: 4                    # DataLoader workers (prevents GPU starvation from procedural PIL masks)
+NUM_WORKERS: 0                    # 0: In-process loading (100% safe against Docker /dev/shm space limits)
 USE_CHECKPOINT: false             # Keeps activations in VRAM to eliminate 2x forward recomputation
 AMP: true                         # Automatic Mixed Precision (unlocks NVIDIA Ampere Tensor Cores)
 LR: 0.0001                        # Generator learning rate

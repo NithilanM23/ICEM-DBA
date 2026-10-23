@@ -9,7 +9,19 @@ import torch
 import torch.multiprocessing as mp
 from torch.utils.data import DataLoader
 
-# Use file_system sharing strategy to prevent shared memory (/dev/shm) crashes in Docker containers
+# Clean up any leftover torch shared memory handles from killed Docker containers
+if os.path.exists('/dev/shm'):
+    try:
+        import glob
+        for f in glob.glob('/dev/shm/torch_*'):
+            try:
+                os.remove(f)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+# Use file_system sharing strategy if multiprocessing is engaged
 try:
     mp.set_sharing_strategy('file_system')
 except Exception:
@@ -102,15 +114,27 @@ def main():
     )
 
     batch_size = config.BATCH_SIZE
-    num_workers = int(getattr(config, 'NUM_WORKERS', 2 if os.name != 'nt' else 0))
-    train_loader = DataLoader(
-        dataset=train_dataset,
-        batch_size=batch_size,
-        shuffle=True,
-        num_workers=num_workers,
-        pin_memory=torch.cuda.is_available(),
-        drop_last=True
-    )
+    num_workers = int(getattr(config, 'NUM_WORKERS', 0))
+    pin_mem = bool(getattr(config, 'PIN_MEMORY', False)) and (num_workers > 0)
+    try:
+        train_loader = DataLoader(
+            dataset=train_dataset,
+            batch_size=batch_size,
+            shuffle=True,
+            num_workers=num_workers,
+            pin_memory=pin_mem,
+            drop_last=True
+        )
+    except Exception as e:
+        print(f"[DataLoader] Notice: fallback to in-process loader (num_workers=0): {e}")
+        train_loader = DataLoader(
+            dataset=train_dataset,
+            batch_size=batch_size,
+            shuffle=True,
+            num_workers=0,
+            pin_memory=False,
+            drop_last=True
+        )
 
     # Model initialization
     print("\n[Model] Initializing ICEM-DBA Inpainting Model...")
