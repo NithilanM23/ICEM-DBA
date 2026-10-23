@@ -51,7 +51,8 @@ class Config(dict):
                 if loaded:
                     self._dict.update(loaded)
             self._dict['CONFIG_PATH'] = config_path
-            self._dict['PATH'] = os.path.dirname(config_path)
+            if 'PATH' not in self._dict or not self._dict['PATH']:
+                self._dict['PATH'] = './checkpoints'
 
         for k, v in kwargs.items():
             if v is not None:
