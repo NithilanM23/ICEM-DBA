@@ -10,6 +10,13 @@ from .icem_dba_modules import (
     GumbelPromptRouter
 )
 
+try:
+    from mamba_ssm.ops.selective_scan_interface import selective_scan_fn
+    HAS_SELECTIVE_SCAN_CUDA = True
+except (ImportError, Exception):
+    selective_scan_fn = None
+    HAS_SELECTIVE_SCAN_CUDA = False
+
 # =========================================================================
 # Pure PyTorch Selective Scan with DIG-SM (C + P_dyn) and DBA-T (dt * guide)
 # =========================================================================
@@ -91,6 +98,28 @@ class PyTorchSelectiveScan(nn.Module):
         else:
             C_att = C_ssm.float()
         C_exp = C_att.unsqueeze(2)           # [B, L, 1, d_state]
+
+        # Fast CUDA kernel dispatch (MambaIRv2 selective_scan_fn integration)
+        if HAS_SELECTIVE_SCAN_CUDA and u.is_cuda:
+            try:
+                xs = x_conv.transpose(1, 2).contiguous()            # [B, d_inner, L]
+                dts = dt_f.transpose(1, 2).contiguous()             # [B, d_inner, L]
+                As = -torch.exp(self.A_log.float()).contiguous()   # [d_inner, d_state]
+                Bs = B_f.transpose(1, 2).unsqueeze(1).contiguous()   # [B, 1, d_state, L]
+                Cs = C_att.transpose(1, 2).unsqueeze(1).contiguous() # [B, 1, d_state, L]
+                Ds = self.D.float().contiguous()
+
+                out_y = selective_scan_fn(
+                    xs, dts, As, Bs, Cs, Ds, z=None,
+                    delta_bias=None, delta_softplus=False, return_last_state=False
+                )
+                if out_y.dim() == 4:
+                    out_y = out_y.squeeze(1)
+                y = out_y.transpose(1, 2).to(u.dtype)
+                y = y * F.silu(z)
+                return self.out_proj(y)
+            except Exception:
+                pass
 
         # Recurrent state propagation maintained strictly in float32 to prevent overflow
         h = torch.zeros(B, self.d_inner, self.d_state, device=u.device, dtype=torch.float32)
