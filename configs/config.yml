@@ -7,7 +7,7 @@
 # Mode & Hardware
 MODE: 1                           # 1: train, 2: test, 3: eval
 SEED: 10                          # Random seed
-GPU: [1]                          # Primary NVIDIA A40 GPU (48GB VRAM)
+GPU: [0]                          # Primary NVIDIA A40 GPU (48GB VRAM)
 PATH: ./checkpoints               # Checkpoint directory
 RESULTS: ./results                # Evaluation output directory
 
