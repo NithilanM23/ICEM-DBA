@@ -51,10 +51,12 @@ def imsave(img_tensor, path):
         im = Image.fromarray(arr, mode='RGB')
     im.save(path)
 
-def stitch_images(inputs, *outputs, img_per_row=1):
+def stitch_images(inputs, *outputs, img_per_row=1, column_titles=None, metric_text=None):
     """
-    Stitches batch images horizontally and vertically for qualitative logging.
+    Stitches batch images horizontally and vertically with optional column headers and metrics footer.
     """
+    from PIL import ImageDraw, ImageFont
+
     gap = 4
     all_imgs = [inputs, *outputs]
     n_categories = len(all_imgs)
@@ -68,12 +70,47 @@ def stitch_images(inputs, *outputs, img_per_row=1):
         first_np = np.array(first)
     height, width = first_np.shape[:2]
 
+    # Default 4-column titles for inpainting comparisons
+    if column_titles is None and n_categories == 4:
+        column_titles = ["(a) Ground Truth", "(b) Masked Input", "(c) ICEM-DBA Output", "(d) Final Composite"]
+
+    header_h = 36 if column_titles else 0
+    footer_h = 32 if metric_text else 0
+
     total_w = width * n_categories * img_per_row + gap * (img_per_row * n_categories - 1)
     n_rows = int(np.ceil(b_size / img_per_row))
-    total_h = height * n_rows + gap * (n_rows - 1)
+    img_grid_h = height * n_rows + gap * (n_rows - 1)
+    total_h = header_h + img_grid_h + footer_h
 
-    grid = Image.new('RGB', (total_w, total_h), (255, 255, 255))
+    # Create canvas with dark modern background
+    bg_color = (24, 24, 27) if (header_h or footer_h) else (255, 255, 255)
+    grid = Image.new('RGB', (total_w, total_h), bg_color)
+    draw = ImageDraw.Draw(grid)
 
+    try:
+        font_header = ImageFont.load_default(size=14)
+        font_footer = ImageFont.load_default(size=13)
+    except TypeError:
+        font_header = ImageFont.load_default()
+        font_footer = ImageFont.load_default()
+
+    # Draw column titles in header banner
+    if column_titles:
+        draw.rectangle([(0, 0), (total_w, header_h)], fill=(24, 24, 27))
+        for cat_idx, title in enumerate(column_titles[:n_categories]):
+            col_x = cat_idx * (width + gap)
+            col_center = col_x + width // 2
+            try:
+                bbox = draw.textbbox((0, 0), title, font=font_header)
+                tw = bbox[2] - bbox[0]
+                th = bbox[3] - bbox[1]
+            except Exception:
+                tw, th = 80, 14
+            tx = col_center - tw // 2
+            ty = (header_h - th) // 2
+            draw.text((tx, ty), title, fill=(244, 244, 245), font=font_header)
+
+    # Paste image blocks
     for b in range(b_size):
         row = b // img_per_row
         col = b % img_per_row
@@ -89,8 +126,22 @@ def stitch_images(inputs, *outputs, img_per_row=1):
                 arr = np.repeat(arr, 3, axis=-1)
             im = Image.fromarray(arr)
             x_pos = (col * n_categories + cat_idx) * (width + gap)
-            y_pos = row * (height + gap)
+            y_pos = header_h + row * (height + gap)
             grid.paste(im, (x_pos, y_pos))
+
+    # Draw metric summary in footer banner
+    if metric_text:
+        foot_y0 = header_h + img_grid_h
+        draw.rectangle([(0, foot_y0), (total_w, total_h)], fill=(15, 23, 42))
+        try:
+            bbox = draw.textbbox((0, 0), metric_text, font=font_footer)
+            tw = bbox[2] - bbox[0]
+            th = bbox[3] - bbox[1]
+        except Exception:
+            tw, th = 200, 14
+        tx = (total_w - tw) // 2
+        ty = foot_y0 + (footer_h - th) // 2
+        draw.text((tx, ty), metric_text, fill=(226, 232, 240), font=font_footer)
 
     return grid
 
