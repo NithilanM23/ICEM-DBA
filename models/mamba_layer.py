@@ -105,9 +105,12 @@ class FastRecurrentScan(torch.autograd.Function):
 
 class PyTorchSelectiveScan(nn.Module):
     """
-    Pure PyTorch implementation of Selective Scan SSM with:
+    Pure PyTorch implementation of Dual-Stream Bidirectional Selective Scan SSM with:
     1. DIG-SM Non-Causal Prompt Injection: C_att = C + P_dyn (Section 3.1 & 3.2 in paper)
     2. DBA-T Continuous Discretization Modulation: Delta_guided = Delta * (1 + tanh(W_align * kappa)) (Section 3.3)
+    3. Dedicated Dual-Stream Forward and Backward Processing with learnable directional gating:
+       - Forward Stream: conv1d_fwd + x_proj_fwd + dt_proj_fwd (Known Context -> Boundary Fringe -> Hole Center)
+       - Backward Stream: conv1d_bwd + x_proj_bwd + dt_proj_bwd (Hole Center -> Boundary Fringe -> Known Context)
     """
     def __init__(self, d_model, d_state=16, d_conv=4, expand=2):
         super().__init__()
@@ -118,7 +121,9 @@ class PyTorchSelectiveScan(nn.Module):
         self.d_inner = int(self.expand * self.d_model)
 
         self.in_proj = nn.Linear(self.d_model, self.d_inner * 2, bias=False)
-        self.conv1d = nn.Conv1d(
+
+        # Dedicated Forward Stream (Inward Propagation: Known -> Hole)
+        self.conv1d_fwd = nn.Conv1d(
             in_channels=self.d_inner,
             out_channels=self.d_inner,
             bias=True,
@@ -126,17 +131,30 @@ class PyTorchSelectiveScan(nn.Module):
             groups=self.d_inner,
             padding=d_conv - 1,
         )
-        self.x_proj = nn.Linear(self.d_inner, self.d_inner // 16 + self.d_state * 2, bias=False)
-        self.dt_proj = nn.Linear(self.d_inner // 16, self.d_inner, bias=True)
-        # Initialize dt_proj bias to negative value for stable initialization (~0.05)
-        nn.init.constant_(self.dt_proj.bias, -3.0)
+        self.x_proj_fwd = nn.Linear(self.d_inner, self.d_inner // 16 + self.d_state * 2, bias=False)
+        self.dt_proj_fwd = nn.Linear(self.d_inner // 16, self.d_inner, bias=True)
+        nn.init.constant_(self.dt_proj_fwd.bias, -3.0)
+        A_fwd = torch.arange(1, self.d_state + 1, dtype=torch.float32).repeat(self.d_inner, 1)
+        self.A_log_fwd = nn.Parameter(torch.log(A_fwd))
 
-        # S4D real initialization for A
-        A = torch.arange(1, self.d_state + 1, dtype=torch.float32).repeat(self.d_inner, 1)
-        self.A_log = nn.Parameter(torch.log(A))
-        self.D = nn.Parameter(torch.ones(self.d_inner))
+        # Dedicated Backward Stream (Outward Propagation: Hole -> Known)
+        self.conv1d_bwd = nn.Conv1d(
+            in_channels=self.d_inner,
+            out_channels=self.d_inner,
+            bias=True,
+            kernel_size=d_conv,
+            groups=self.d_inner,
+            padding=d_conv - 1,
+        )
+        self.x_proj_bwd = nn.Linear(self.d_inner, self.d_inner // 16 + self.d_state * 2, bias=False)
+        self.dt_proj_bwd = nn.Linear(self.d_inner // 16, self.d_inner, bias=True)
+        nn.init.constant_(self.dt_proj_bwd.bias, -3.0)
+        A_bwd = torch.arange(1, self.d_state + 1, dtype=torch.float32).repeat(self.d_inner, 1)
+        self.A_log_bwd = nn.Parameter(torch.log(A_bwd))
+
         # Learned bidirectional forward-reverse directional gating (initialized to 0.0 -> balanced 50/50 blend)
         self.bidirectional_gate = nn.Parameter(torch.zeros(1, 1, self.d_inner))
+        self.D = nn.Parameter(torch.ones(self.d_inner))
         self.out_proj = nn.Linear(self.d_inner, self.d_model, bias=False)
 
     def forward(self, u, P_dyn=None, delta_guide=None):
@@ -147,106 +165,69 @@ class PyTorchSelectiveScan(nn.Module):
         Returns: [B, L, D]
         """
         B, L, D = u.shape
+        dt_rank = self.d_inner // 16
         xz = self.in_proj(u)  # [B, L, 2 * d_inner]
         x, z = xz.chunk(2, dim=-1)
 
-        # 1D Depthwise causal convolution
-        x_conv = x.transpose(1, 2)  # [B, d_inner, L]
-        x_conv = self.conv1d(x_conv)[:, :, :L]
-        x_conv = F.silu(x_conv).transpose(1, 2)  # [B, L, d_inner]
+        # ---------------------------------------------------------------------
+        # 1. Forward Stream: Known Context -> Boundary Fringe -> Hole Center
+        # ---------------------------------------------------------------------
+        x_conv_fwd = self.conv1d_fwd(x.transpose(1, 2))[:, :, :L]
+        x_conv_fwd = F.silu(x_conv_fwd).transpose(1, 2)  # [B, L, d_inner]
 
-        # Project for dt, B, C
-        x_dbl = self.x_proj(x_conv)  # [B, L, dt_rank + 2 * d_state]
-        dt_rank = self.d_inner // 16
-        dt, B_ssm, C_ssm = torch.split(x_dbl, [dt_rank, self.d_state, self.d_state], dim=-1)
-        dt = F.softplus(self.dt_proj(dt)).clamp(min=1e-4, max=5.0)  # [B, L, d_inner]
-
-        # --- Component C (DBA-T): Modulate continuous SSM discretization dt ---
+        x_dbl_fwd = self.x_proj_fwd(x_conv_fwd)
+        dt_fwd, B_fwd, C_fwd = torch.split(x_dbl_fwd, [dt_rank, self.d_state, self.d_state], dim=-1)
+        dt_fwd = F.softplus(self.dt_proj_fwd(dt_fwd)).clamp(min=1e-4, max=5.0)
         if delta_guide is not None:
-            dt = dt * delta_guide  # [B, L, d_inner]
+            dt_fwd = dt_fwd * delta_guide
+        C_att_fwd = (C_fwd + P_dyn).float() if P_dyn is not None else C_fwd.float()
 
-        dt_f = dt.float()
-        B_f = B_ssm.float()
+        # ---------------------------------------------------------------------
+        # 2. Backward Stream: Hole Center -> Boundary Fringe -> Known Context
+        # ---------------------------------------------------------------------
+        x_rev = torch.flip(x, dims=[1]).transpose(1, 2)
+        x_conv_bwd = self.conv1d_bwd(x_rev)[:, :, :L]
+        x_conv_bwd = F.silu(x_conv_bwd).transpose(1, 2)  # [B, L, d_inner]
 
-        # --- Component A (DIG-SM): Prompt Injection C_att = C + P_dyn ---
-        if P_dyn is not None:
-            C_att = (C_ssm + P_dyn).float()  # [B, L, d_state]
-        else:
-            C_att = C_ssm.float()
+        x_dbl_bwd = self.x_proj_bwd(x_conv_bwd)
+        dt_bwd, B_bwd, C_bwd = torch.split(x_dbl_bwd, [dt_rank, self.d_state, self.d_state], dim=-1)
+        dt_bwd = F.softplus(self.dt_proj_bwd(dt_bwd)).clamp(min=1e-4, max=5.0)
+        if delta_guide is not None:
+            dt_bwd = dt_bwd * torch.flip(delta_guide, dims=[1])
+        C_att_bwd = (C_bwd + torch.flip(P_dyn, dims=[1])).float() if P_dyn is not None else C_bwd.float()
 
-        # Fast CUDA kernel dispatch (MambaIRv2 selective_scan_fn integration with bidirectional scan)
-        if HAS_SELECTIVE_SCAN_CUDA and u.is_cuda:
-            try:
-                xs = x_conv.transpose(1, 2).contiguous()            # [B, d_inner, L]
-                dts = dt_f.transpose(1, 2).contiguous()             # [B, d_inner, L]
-                As = -torch.exp(self.A_log.float()).contiguous()   # [d_inner, d_state]
-                Bs = B_f.transpose(1, 2).unsqueeze(1).contiguous()   # [B, 1, d_state, L]
-                Cs = C_att.transpose(1, 2).unsqueeze(1).contiguous() # [B, 1, d_state, L]
-                Ds = self.D.float().contiguous()
-                delta_bias = torch.zeros(self.d_inner, device=u.device, dtype=torch.float32)
+        # ---------------------------------------------------------------------
+        # 3. Discretization & Dual-Stream State-Space Recurrence
+        # ---------------------------------------------------------------------
+        # Forward SSM discretization
+        A_fwd = -torch.exp(self.A_log_fwd.float())
+        a_fwd = torch.exp((dt_fwd.float().unsqueeze(-1) * A_fwd).clamp(max=0.0))
+        b_fwd = (dt_fwd.float() * x_conv_fwd.float()).unsqueeze(-1) * B_fwd.float().unsqueeze(-2)
 
-                out_y_fwd = selective_scan_fn(
-                    xs, dts, As, Bs, Cs, Ds, z=None,
-                    delta_bias=delta_bias, delta_softplus=False, return_last_state=False
-                )
-                if out_y_fwd.dim() == 4:
-                    out_y_fwd = out_y_fwd.squeeze(1)
-                y_fwd = out_y_fwd.transpose(1, 2).to(u.dtype)
+        # Backward SSM discretization
+        A_bwd = -torch.exp(self.A_log_bwd.float())
+        a_bwd = torch.exp((dt_bwd.float().unsqueeze(-1) * A_bwd).clamp(max=0.0))
+        b_bwd = (dt_bwd.float() * x_conv_bwd.float()).unsqueeze(-1) * B_bwd.float().unsqueeze(-2)
 
-                # Reverse scan for bidirectional CUDA processing
-                xs_rev = torch.flip(xs, dims=[-1]).contiguous()
-                dts_rev = torch.flip(dts, dims=[-1]).contiguous()
-                Bs_rev = torch.flip(Bs, dims=[-1]).contiguous()
-                Cs_rev = torch.flip(Cs, dims=[-1]).contiguous()
-
-                out_y_rev = selective_scan_fn(
-                    xs_rev, dts_rev, As, Bs_rev, Cs_rev, Ds, z=None,
-                    delta_bias=delta_bias, delta_softplus=False, return_last_state=False
-                )
-                if out_y_rev.dim() == 4:
-                    out_y_rev = out_y_rev.squeeze(1)
-                y_rev = torch.flip(out_y_rev.transpose(1, 2), dims=[1]).to(u.dtype)
-
-                gate = torch.sigmoid(self.bidirectional_gate.to(u.dtype))
-                y = gate * y_fwd + (1.0 - gate) * y_rev
-                y = y + x_conv * self.D.to(u.dtype)
-                y = y * F.silu(z)
-                return self.out_proj(y)
-            except Exception:
-                pass
-
-        # FastRecurrentScan: O(1) autograd node with custom adjoint backward pass
-        # Zero OOM risk (~400 MB peak VRAM per block instead of 10 GB)
-        A = -torch.exp(self.A_log.float())                            # [d_inner, d_state]
-        log_a = (dt_f.unsqueeze(-1) * A).clamp(max=0.0)
-        a = torch.exp(log_a)                                          # [B, L, d_inner, d_state]
-        u_weighted = dt_f * x_conv.float()                            # [B, L, d_inner]
-        b = u_weighted.unsqueeze(-1) * B_f.unsqueeze(-2)              # [B, L, d_inner, d_state]
-        C_exp = C_att.unsqueeze(2)                                   # [B, L, 1, d_state]
-
-        # Non-Causal Bidirectional Scanning: Forward & Reverse State Propagation
         if not torch.is_grad_enabled() and (L % 64 == 0):
-            h_fwd = chunked_scan(a, b, chunk_size=64)
-            a_rev = torch.flip(a, dims=[1]).contiguous()
-            b_rev = torch.flip(b, dims=[1]).contiguous()
-            h_rev_raw = chunked_scan(a_rev, b_rev, chunk_size=64)
-            h_rev = torch.flip(h_rev_raw, dims=[1]).contiguous()
+            h_fwd = chunked_scan(a_fwd, b_fwd, chunk_size=64)
+            h_bwd_raw = chunked_scan(a_bwd, b_bwd, chunk_size=64)
         else:
-            h_fwd = FastRecurrentScan.apply(a, b)                         # [B, L, d_inner, d_state]
-            a_rev = torch.flip(a, dims=[1]).contiguous()
-            b_rev = torch.flip(b, dims=[1]).contiguous()
-            h_rev_raw = FastRecurrentScan.apply(a_rev, b_rev)
-            h_rev = torch.flip(h_rev_raw, dims=[1]).contiguous()
+            h_fwd = FastRecurrentScan.apply(a_fwd, b_fwd)
+            h_bwd_raw = FastRecurrentScan.apply(a_bwd, b_bwd)
 
-        y_fwd = (h_fwd * C_exp).sum(dim=-1).to(u.dtype)                   # [B, L, d_inner]
-        y_rev = (h_rev * C_exp).sum(dim=-1).to(u.dtype)                   # [B, L, d_inner]
+        y_fwd = (h_fwd * C_att_fwd.unsqueeze(2)).sum(dim=-1).to(u.dtype)
+        y_bwd_raw = (h_bwd_raw * C_att_bwd.unsqueeze(2)).sum(dim=-1).to(u.dtype)
+        y_bwd = torch.flip(y_bwd_raw, dims=[1])  # Restore coordinate traversal order
 
-        # Learnable directional fusion between forward and reverse state spaces
+        # ---------------------------------------------------------------------
+        # 4. Learned Channel-Wise Directional Gated Fusion
+        # ---------------------------------------------------------------------
         gate = torch.sigmoid(self.bidirectional_gate.to(u.dtype))
-        y = gate * y_fwd + (1.0 - gate) * y_rev                           # [B, L, d_inner]
-        y = y + x_conv * self.D.to(u.dtype)
+        y = gate * y_fwd + (1.0 - gate) * y_bwd
+        y = y + x_conv_fwd * self.D.to(u.dtype)
         y = y * F.silu(z)
-        out = self.out_proj(y)                                            # [B, L, D]
+        out = self.out_proj(y)
         return out
 
 
