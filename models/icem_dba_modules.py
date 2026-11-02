@@ -110,9 +110,12 @@ class CNNScoreMap(nn.Module):
 
 class DirectionalBoundaryAffinity(nn.Module):
     r"""
-    Computes 2D physical gradient of the distance field \nabla D(p) and feature gradient \nabla F(p),
-    evaluates directional cosine alignment \kappa_t, and generates state retention modulation.
-    Locks state retention along continuous physical contours (jawline, hair flow, architectural lines).
+    Enhanced Dyadic Multi-Scale Directional Boundary Affinity (DBA-T):
+    Computes 2D physical gradient of the distance field \nabla D(p) and feature gradient \nabla F(p)
+    at both fine micro-edge (dilation=1) and coarse contour (dilation=2) scales.
+    Evaluates multi-scale directional cosine alignments \kappa^{(1)} and \kappa^{(2)},
+    fuses them via learned scale-attention, and modulates continuous SSM state retention \Delta t.
+    Locks state retention along continuous physical contours (jawline, hair flow, architectural lines, lip edges).
     """
     def __init__(self, dim, eps=1e-4):
         super().__init__()
@@ -130,19 +133,22 @@ class DirectionalBoundaryAffinity(nn.Module):
         self.register_buffer('sobel_x', sobel_x)
         self.register_buffer('sobel_y', sobel_y)
         
+        # Learned scale attention across fine (dilation=1) and coarse (dilation=2) edge scales
+        self.scale_attn = nn.Parameter(torch.zeros(2))
+        
         # Align projection: maps alignment score \kappa_t to SSM scale factor
         self.w_align = nn.Parameter(torch.ones(1, 1, 1))
 
-    def compute_gradients(self, tensor_map):
+    def compute_gradients(self, tensor_map, dilation=1, padding=1):
         """
-        Computes 2D spatial gradients dx, dy via Sobel convolution.
+        Computes 2D spatial gradients dx, dy via Sobel convolution at specified dilation.
         tensor_map: [B, 1, H, W]
         Returns: grad_x, grad_y: [B, 1, H, W]
         """
         sobel_x = self.sobel_x.to(dtype=tensor_map.dtype, device=tensor_map.device)
         sobel_y = self.sobel_y.to(dtype=tensor_map.dtype, device=tensor_map.device)
-        grad_x = F.conv2d(tensor_map, sobel_x, padding=1)
-        grad_y = F.conv2d(tensor_map, sobel_y, padding=1)
+        grad_x = F.conv2d(tensor_map, sobel_x, padding=padding, dilation=dilation)
+        grad_y = F.conv2d(tensor_map, sobel_y, padding=padding, dilation=dilation)
         return grad_x, grad_y
 
     def forward(self, feature_map, distance_map):
@@ -155,22 +161,27 @@ class DirectionalBoundaryAffinity(nn.Module):
         """
         # Collapse feature to 1-channel magnitude representation for edge direction
         feat_mag = torch.mean(torch.abs(feature_map), dim=1, keepdim=True)
-        
-        # 1. Feature gradients \nabla F(p)
-        df_x, df_y = self.compute_gradients(feat_mag)
-        df_norm = torch.sqrt(df_x ** 2 + df_y ** 2 + self.eps)
-        
-        # 2. Distance field gradients \nabla D(p)
         distance_map = distance_map.to(dtype=feat_mag.dtype, device=feat_mag.device)
-        dd_x, dd_y = self.compute_gradients(distance_map)
-        dd_norm = torch.sqrt(dd_x ** 2 + dd_y ** 2 + self.eps)
         
-        # 3. Directional cosine alignment \kappa_t
-        dot_product = (df_x * dd_x) + (df_y * dd_y)
-        kappa = dot_product / (df_norm * dd_norm + self.eps)
-        kappa = torch.clamp(kappa, min=-1.0, max=1.0)
+        # Scale 1: Fine micro-edges (dilation=1, padding=1)
+        df_x1, df_y1 = self.compute_gradients(feat_mag, dilation=1, padding=1)
+        dd_x1, dd_y1 = self.compute_gradients(distance_map, dilation=1, padding=1)
+        df_norm1 = torch.sqrt(df_x1 ** 2 + df_y1 ** 2 + self.eps)
+        dd_norm1 = torch.sqrt(dd_x1 ** 2 + dd_y1 ** 2 + self.eps)
+        kappa1 = torch.clamp(((df_x1 * dd_x1) + (df_y1 * dd_y1)) / (df_norm1 * dd_norm1 + self.eps), -1.0, 1.0)
+
+        # Scale 2: Coarse contours (dilation=2, padding=2)
+        df_x2, df_y2 = self.compute_gradients(feat_mag, dilation=2, padding=2)
+        dd_x2, dd_y2 = self.compute_gradients(distance_map, dilation=2, padding=2)
+        df_norm2 = torch.sqrt(df_x2 ** 2 + df_y2 ** 2 + self.eps)
+        dd_norm2 = torch.sqrt(dd_x2 ** 2 + dd_y2 ** 2 + self.eps)
+        kappa2 = torch.clamp(((df_x2 * dd_x2) + (df_y2 * dd_y2)) / (df_norm2 * dd_norm2 + self.eps), -1.0, 1.0)
+
+        # Learned multi-scale dyadic fusion
+        scale_weights = F.softmax(self.scale_attn, dim=0)
+        kappa = scale_weights[0] * kappa1 + scale_weights[1] * kappa2
         
-        # 4. Continuous SSM Discretization Modulation: 1.0 + tanh(W_align * \kappa)
+        # Continuous SSM Discretization Modulation: 1.0 + tanh(W_align * \kappa)
         mod_factor = 1.0 + torch.tanh(self.w_align.to(feat_mag.dtype) * kappa)
         return kappa, mod_factor
 
@@ -181,9 +192,11 @@ class DirectionalBoundaryAffinity(nn.Module):
 
 class InstanceConditionedExemplarMemory(nn.Module):
     """
-    Component A: DIG-SM (Dynamic Instance-Grounded Semantic Modulation)
-    Component B: LC-VER (Linear-Complexity Visible Exemplar Readout)
-    Strictly follows the PyTorch Implementation Blueprint in Section 3.4 of the research report.
+    Enhanced ICEM:
+    Component A: DIG-SM with Spatially Preserved Spatial Pyramid Anchors
+                 (Global 1x1, Quadrants 2x2, Sub-regions 4x4) with mask-normalization.
+    Component B: LC-VER with Hierarchical Multi-Scale Exemplar Retrieval
+                 (Global Visible Memory + Regional Grid Visible Memory) in linear O(L) time.
     """
     def __init__(self, dim, d_state=16, inner_rank=32, d_key=16):
         super().__init__()
@@ -192,23 +205,48 @@ class InstanceConditionedExemplarMemory(nn.Module):
         self.inner_rank = inner_rank
         self.d_key = d_key
 
-        # --- Component A: DIG-SM Anchor & Codebook Projections ---
-        self.vis_pool = nn.AdaptiveAvgPool2d((4, 4))
+        # --- Component A: DIG-SM Spatial Pyramid Anchor & Codebook Projections ---
+        # 1x1 (1 bin) + 2x2 (4 bins) + 4x4 (16 bins) = 21 spatial anchors
+        self.total_pyramid_bins = 1 + 4 + 16  # 21
         self.inst_proj = nn.Sequential(
-            nn.Linear(dim * 16, dim),
+            nn.Linear(dim * self.total_pyramid_bins, dim),
             nn.GELU(),
             nn.Linear(dim, inner_rank * d_state)
         )
         self.inst_beta = nn.Parameter(torch.tensor(0.1))
 
-        # --- Component B: LC-VER Kernelized Linear Key-Value Cache ---
+        # --- Component B: LC-VER Kernelized Linear Key-Value Projections ---
         self.to_q = nn.Linear(dim, d_key, bias=False)
         self.to_k = nn.Linear(dim, d_key, bias=False)
         self.to_v = nn.Linear(dim, dim, bias=False)
+
+        # Hierarchical adaptive gate fusing global context with fine regional exemplars
+        self.hier_gate = nn.Sequential(
+            nn.Linear(dim * 3, dim),
+            nn.Sigmoid()
+        )
+
+        # Dynamic distance/confidence-weighted gating
         self.gamma_gate = nn.Sequential(
             nn.Linear(dim + 1, dim),
             nn.Sigmoid()
         )
+
+    def _extract_pyramid_anchors(self, x, known_mask):
+        """
+        Extracts mask-normalized spatial pyramid anchors:
+        Global (1x1) + Bilateral Quadrants (2x2) + Local Sub-regions (4x4).
+        Mask-normalization prevents magnitude dilution in heavily masked regions.
+        """
+        anchors = []
+        for grid_size in [(1, 1), (2, 2), (4, 4)]:
+            feat_sum = F.adaptive_avg_pool2d(x * known_mask, grid_size)
+            mask_sum = F.adaptive_avg_pool2d(known_mask, grid_size)
+            # Mask-normalized pool
+            normed = feat_sum / (mask_sum + 1e-4)
+            valid = (mask_sum > 1e-4).float()
+            anchors.append((normed * valid).flatten(1))
+        return torch.cat(anchors, dim=1)  # [B, C * 21]
 
     def forward(self, x, mask, shared_N):
         """
@@ -224,15 +262,14 @@ class InstanceConditionedExemplarMemory(nn.Module):
         known_mask = (1.0 - mask).float()  # [B, 1, H, W]
 
         # ---------------------------------------------------------------------
-        # A. DIG-SM: Dynamic Instance Codebook Synthesis
+        # A. DIG-SM: Spatially Preserved Instance Codebook Synthesis
         # ---------------------------------------------------------------------
-        # Extract visible features and spatial-semantic anchor pooling
-        anchors = self.vis_pool(x * known_mask).flatten(1)  # [B, C * 16]
-        delta_N = torch.tanh(self.inst_proj(anchors)).view(B, self.inner_rank, self.d_state)
+        pyramid_anchors = self._extract_pyramid_anchors(x, known_mask)  # [B, C * 21]
+        delta_N = torch.tanh(self.inst_proj(pyramid_anchors)).view(B, self.inner_rank, self.d_state)
         N_inst = shared_N.unsqueeze(0) + self.inst_beta * delta_N  # [B, inner_rank, d_state]
 
         # ---------------------------------------------------------------------
-        # B. LC-VER: Kernelized Linear Visible Memory Cache O(L)
+        # B. LC-VER: Hierarchical Multi-Scale Visible Memory Retrieval O(L)
         # ---------------------------------------------------------------------
         x_flat = x.permute(0, 2, 3, 1).contiguous().view(B, L, C)  # [B, L, C]
         k_flat = known_mask.view(B, L, 1)                           # [B, L, 1]
@@ -241,21 +278,65 @@ class InstanceConditionedExemplarMemory(nn.Module):
         # Positive kernel mapping \phi(x) = elu(x) + 1.0 on visible keys
         phi_k = (F.elu(self.to_k(x_flat)) + 1.0) * k_flat           # [B, L, d_key]
         v_vis = self.to_v(x_flat) * k_flat                          # [B, L, C]
+        phi_q = F.elu(self.to_q(x_flat)) + 1.0                      # [B, L, d_key]
 
-        # Global visible memory descriptor matrix S_vis: [B, d_key, C] - COMPUTED ONCE
+        # 1. Global visible memory descriptor matrix S_vis: [B, d_key, C]
         S_vis = torch.bmm(phi_k.transpose(1, 2), v_vis)             # [B, d_key, C]
         z_vis = phi_k.sum(dim=1, keepdim=True)                      # [B, 1, d_key]
 
-        # Query visible exemplars for all tokens
-        phi_q = F.elu(self.to_q(x_flat)) + 1.0                      # [B, L, d_key]
-        
-        # O(1) constant-time readout per token
-        denom = torch.bmm(phi_q, z_vis.transpose(1, 2)).clamp(min=1e-4) # [B, L, 1]
-        exemplar = torch.bmm(phi_q, S_vis) / denom                  # [B, L, C]
+        denom_global = torch.bmm(phi_q, z_vis.transpose(1, 2)).clamp(min=1e-4)  # [B, L, 1]
+        exemplar_global = torch.bmm(phi_q, S_vis) / denom_global                  # [B, L, C]
 
-        # Dynamic distance/confidence-weighted gating \gamma_t
+        # 2. Regional visible memory grid (4x4 spatial cells)
+        if H >= 4 and W >= 4 and (H % 4 == 0) and (W % 4 == 0):
+            G = 4
+            H_c, W_c = H // G, W // G
+            L_c = H_c * W_c
+            
+            # Partition tokens into 16 spatial cells: [B, 16, L_c, ...]
+            phi_k_grid = (phi_k.view(B, H, W, self.d_key)
+                          .view(B, G, H_c, G, W_c, self.d_key)
+                          .permute(0, 1, 3, 2, 4, 5)
+                          .contiguous()
+                          .view(B, 16, L_c, self.d_key))
+            v_vis_grid = (v_vis.view(B, H, W, C)
+                          .view(B, G, H_c, G, W_c, C)
+                          .permute(0, 1, 3, 2, 4, 5)
+                          .contiguous()
+                          .view(B, 16, L_c, C))
+            
+            # Batched regional key-value memory: [B, 16, d_key, C]
+            S_reg = torch.matmul(phi_k_grid.transpose(2, 3), v_vis_grid)
+            z_reg = phi_k_grid.sum(dim=2, keepdim=True)  # [B, 16, 1, d_key]
+
+            phi_q_grid = (phi_q.view(B, H, W, self.d_key)
+                          .view(B, G, H_c, G, W_c, self.d_key)
+                          .permute(0, 1, 3, 2, 4, 5)
+                          .contiguous()
+                          .view(B, 16, L_c, self.d_key))
+            denom_reg = torch.matmul(phi_q_grid, z_reg.transpose(2, 3)).clamp(min=1e-4)  # [B, 16, L_c, 1]
+            exemplar_reg_grid = torch.matmul(phi_q_grid, S_reg) / denom_reg              # [B, 16, L_c, C]
+
+            # Reconstruct raster sequence: [B, L, C]
+            exemplar_reg = (exemplar_reg_grid.view(B, G, G, H_c, W_c, C)
+                            .permute(0, 1, 3, 2, 4, 5)
+                            .contiguous()
+                            .view(B, L, C))
+
+            # Regional cell confidence fallback (if a cell contains few/no visible tokens)
+            cell_vis = z_reg.sum(dim=-1, keepdim=True)  # [B, 16, 1, 1]
+            cell_conf = torch.sigmoid((cell_vis - 1.0) * 2.0).expand(-1, -1, L_c, C).contiguous().view(B, L, C)
+            exemplar_reg_safe = cell_conf * exemplar_reg + (1.0 - cell_conf) * exemplar_global
+        else:
+            exemplar_reg_safe = exemplar_global
+
+        # 3. Hierarchical fusion of regional and global exemplar readouts
+        hier_gate = self.hier_gate(torch.cat([x_flat, exemplar_global, exemplar_reg_safe], dim=-1))
+        exemplar_fused = hier_gate * exemplar_reg_safe + (1.0 - hier_gate) * exemplar_global
+
+        # 4. Dynamic distance/confidence-weighted gating \gamma_t
         gamma = self.gamma_gate(torch.cat([x_flat, m_flat], dim=-1)) * m_flat  # [B, L, C]
-        exemplar_out = (gamma * exemplar).permute(0, 2, 1).view(B, C, H, W)   # [B, C, H, W]
+        exemplar_out = (gamma * exemplar_fused).permute(0, 2, 1).view(B, C, H, W)   # [B, C, H, W]
 
         return N_inst, exemplar_out
 
@@ -332,14 +413,28 @@ class MACGPathfinder(nn.Module):
 
             dist_squeezed = dist_priority_pooled.squeeze(1)
             mask_squeezed = mask_pooled.squeeze(1)
+            _, H_p, W_p = dist_squeezed.shape
 
-            # Inward confidence traversal scoring:
-            # Known Tokens (10,000) >> Outer Boundary (100) >> Deep Hole Center (0 + texture score)
+            # Inward confidence traversal scoring with concentric rings and 2D spatial locality guidance:
+            # 1. Known Tokens (10,000) >> Inward Boundary Fringe >> Deep Hole Center
             known_boost = (1.0 - mask_squeezed) * 10000.0
-            spiral_boost = mask_squeezed * dist_squeezed * 100.0
-            texture_scores = score_map * 1.0
 
-            final_scores = known_boost + spiral_boost + texture_scores
+            # 2. Concentric geodesic rings (quantized isocontours inward from outer boundary to center)
+            # 16 discrete concentric rings enforce steady inwards wavefront without cross-facial jumps
+            ring_idx = torch.floor(dist_squeezed * 15.999).clamp(min=0.0, max=15.0)
+            ring_boost = mask_squeezed * (ring_idx * 50.0)
+
+            # 3. 2D Serpentine continuous locality bias to preserve spatial contiguity within rings
+            y_coords = torch.arange(H_p, device=x.device, dtype=x.dtype).view(H_p, 1).repeat(1, W_p)
+            x_coords = torch.arange(W_p, device=x.device, dtype=x.dtype).view(1, W_p).repeat(H_p, 1)
+            serp_x = torch.where(y_coords.long() % 2 == 0, x_coords, (float(W_p) - 1.0) - x_coords)
+            serp_pos = (y_coords * float(W_p) + serp_x) / float(max(1, H_p * W_p))
+            locality_scores = serp_pos.unsqueeze(0).expand(B, -1, -1) * 2.0
+
+            # 4. Fine content & texture saliency for local feature ordering
+            texture_scores = score_map * 0.5
+
+            final_scores = known_boost + ring_boost + locality_scores + texture_scores
         else:
             final_scores = score_map
             distance_map = torch.zeros(B, 1, H, W, device=x.device, dtype=x.dtype)

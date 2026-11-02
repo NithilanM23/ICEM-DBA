@@ -135,6 +135,8 @@ class PyTorchSelectiveScan(nn.Module):
         A = torch.arange(1, self.d_state + 1, dtype=torch.float32).repeat(self.d_inner, 1)
         self.A_log = nn.Parameter(torch.log(A))
         self.D = nn.Parameter(torch.ones(self.d_inner))
+        # Learned bidirectional forward-reverse directional gating (initialized to 0.0 -> balanced 50/50 blend)
+        self.bidirectional_gate = nn.Parameter(torch.zeros(1, 1, self.d_inner))
         self.out_proj = nn.Linear(self.d_inner, self.d_model, bias=False)
 
     def forward(self, u, P_dyn=None, delta_guide=None):
@@ -172,7 +174,7 @@ class PyTorchSelectiveScan(nn.Module):
         else:
             C_att = C_ssm.float()
 
-        # Fast CUDA kernel dispatch (MambaIRv2 selective_scan_fn integration)
+        # Fast CUDA kernel dispatch (MambaIRv2 selective_scan_fn integration with bidirectional scan)
         if HAS_SELECTIVE_SCAN_CUDA and u.is_cuda:
             try:
                 xs = x_conv.transpose(1, 2).contiguous()            # [B, d_inner, L]
@@ -183,13 +185,31 @@ class PyTorchSelectiveScan(nn.Module):
                 Ds = self.D.float().contiguous()
                 delta_bias = torch.zeros(self.d_inner, device=u.device, dtype=torch.float32)
 
-                out_y = selective_scan_fn(
+                out_y_fwd = selective_scan_fn(
                     xs, dts, As, Bs, Cs, Ds, z=None,
                     delta_bias=delta_bias, delta_softplus=False, return_last_state=False
                 )
-                if out_y.dim() == 4:
-                    out_y = out_y.squeeze(1)
-                y = out_y.transpose(1, 2).to(u.dtype)
+                if out_y_fwd.dim() == 4:
+                    out_y_fwd = out_y_fwd.squeeze(1)
+                y_fwd = out_y_fwd.transpose(1, 2).to(u.dtype)
+
+                # Reverse scan for bidirectional CUDA processing
+                xs_rev = torch.flip(xs, dims=[-1]).contiguous()
+                dts_rev = torch.flip(dts, dims=[-1]).contiguous()
+                Bs_rev = torch.flip(Bs, dims=[-1]).contiguous()
+                Cs_rev = torch.flip(Cs, dims=[-1]).contiguous()
+
+                out_y_rev = selective_scan_fn(
+                    xs_rev, dts_rev, As, Bs_rev, Cs_rev, Ds, z=None,
+                    delta_bias=delta_bias, delta_softplus=False, return_last_state=False
+                )
+                if out_y_rev.dim() == 4:
+                    out_y_rev = out_y_rev.squeeze(1)
+                y_rev = torch.flip(out_y_rev.transpose(1, 2), dims=[1]).to(u.dtype)
+
+                gate = torch.sigmoid(self.bidirectional_gate.to(u.dtype))
+                y = gate * y_fwd + (1.0 - gate) * y_rev
+                y = y + x_conv * self.D.to(u.dtype)
                 y = y * F.silu(z)
                 return self.out_proj(y)
             except Exception:
@@ -204,15 +224,29 @@ class PyTorchSelectiveScan(nn.Module):
         b = u_weighted.unsqueeze(-1) * B_f.unsqueeze(-2)              # [B, L, d_inner, d_state]
         C_exp = C_att.unsqueeze(2)                                   # [B, L, 1, d_state]
 
+        # Non-Causal Bidirectional Scanning: Forward & Reverse State Propagation
         if not torch.is_grad_enabled() and (L % 64 == 0):
-            h = chunked_scan(a, b, chunk_size=64)
+            h_fwd = chunked_scan(a, b, chunk_size=64)
+            a_rev = torch.flip(a, dims=[1]).contiguous()
+            b_rev = torch.flip(b, dims=[1]).contiguous()
+            h_rev_raw = chunked_scan(a_rev, b_rev, chunk_size=64)
+            h_rev = torch.flip(h_rev_raw, dims=[1]).contiguous()
         else:
-            h = FastRecurrentScan.apply(a, b)                             # [B, L, d_inner, d_state]
+            h_fwd = FastRecurrentScan.apply(a, b)                         # [B, L, d_inner, d_state]
+            a_rev = torch.flip(a, dims=[1]).contiguous()
+            b_rev = torch.flip(b, dims=[1]).contiguous()
+            h_rev_raw = FastRecurrentScan.apply(a_rev, b_rev)
+            h_rev = torch.flip(h_rev_raw, dims=[1]).contiguous()
 
-        y = (h * C_exp).sum(dim=-1).to(u.dtype)                       # [B, L, d_inner]
+        y_fwd = (h_fwd * C_exp).sum(dim=-1).to(u.dtype)                   # [B, L, d_inner]
+        y_rev = (h_rev * C_exp).sum(dim=-1).to(u.dtype)                   # [B, L, d_inner]
+
+        # Learnable directional fusion between forward and reverse state spaces
+        gate = torch.sigmoid(self.bidirectional_gate.to(u.dtype))
+        y = gate * y_fwd + (1.0 - gate) * y_rev                           # [B, L, d_inner]
         y = y + x_conv * self.D.to(u.dtype)
         y = y * F.silu(z)
-        out = self.out_proj(y)                                        # [B, L, D]
+        out = self.out_proj(y)                                            # [B, L, D]
         return out
 
 
