@@ -37,12 +37,16 @@ results/
 figures/
 
 data/celeba_test
+data/pconv_masks
 
 Review_3_Presentation.pptx
 
 POSTPROCESSED_EVALUATION_REPORT.md
-
+MULTI_CATEGORY_POSTPROCESSED_REPORT.md
+SOTA_COMPARISON_REPORT.md
 INDEPENDENT_VERIFICATION_PROTOCOL.md
+
+run_all_mask_brackets.py
 
 evaluate_2k_full_metrics.py
 
