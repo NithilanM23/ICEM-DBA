@@ -43,11 +43,10 @@ ENABLE_DBA_T: true                # Directional Boundary Affinity Transition
 
 # Optimization & Training
 # Hardware Profiles:
-#   - A40 Mode (48GB VRAM): BATCH_SIZE: 16 (Optimal sweet spot: 22-26 GB VRAM, 0% OOM risk, perfect 16-warp alignment)
-#     (Can be increased up to 20 or 24 if you wish to push VRAM to 32-35 GB)
+#   - RTX A6000 / A40 Mode (48GB VRAM): BATCH_SIZE: 32 (Fills ~18-24 GB VRAM safely with zero OOM risk)
 #   - 8GB Mode (RTX 5060): BATCH_SIZE: 8, GRAD_ACCUM_STEPS: 2, AMP: false, USE_CHECKPOINT: true (uses ~6-7 GB VRAM)
-BATCH_SIZE: 16                     # Optimal sweet spot for 48GB A40 (fills ~22-26 GB VRAM safely with zero OOM risk)
-GRAD_ACCUM_STEPS: 1               # Single step updates (Effective batch size = 16)
+BATCH_SIZE: 32                    # Optimal for 48GB RTX A6000 (fills ~18-24 GB VRAM safely with zero OOM risk)
+GRAD_ACCUM_STEPS: 1               # Single step updates (Effective batch size = 32)
 NUM_WORKERS: 0                    # 0: In-process loading (100% safe against Docker /dev/shm space limits)
 USE_CHECKPOINT: true              # Keeps activation memory low (~8-12 GB VRAM) with zero OOM risk
 AMP: false                        # Full FP32 precision (guarantees zero NaN / zero overflow on 48GB A40)
