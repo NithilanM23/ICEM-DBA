@@ -166,7 +166,7 @@ def main():
 
     psnr_metric = PSNR(255.0).to(config.DEVICE)
     max_iteration = int(config.MAX_ITERS)
-    epoch = 0
+    epoch = model.iteration // max(1, steps_per_epoch)
 
     log_interval = int(getattr(config, 'LOG_INTERVAL', 20))
 
@@ -197,6 +197,14 @@ def main():
     last_sample_iter = -1
     last_save_iter = -1
     best_psnr = -1.0
+    best_gen_path = os.path.join(checkpoint_dir, 'icem_dba_gen_best.pth')
+    if os.path.exists(best_gen_path):
+        try:
+            ckpt_best = torch.load(best_gen_path, map_location='cpu')
+            best_psnr = float(ckpt_best.get('psnr', -1.0))
+            print(f"[Checkpoint] Found existing best model checkpoint with PSNR: {best_psnr:.2f}dB")
+        except Exception:
+            pass
 
     sample_interval = getattr(config, 'SAMPLE_INTERVAL', 500)
     save_interval = getattr(config, 'SAVE_INTERVAL', 1000)
@@ -297,14 +305,14 @@ def main():
             if should_sample:
                 last_sample_iter = iteration
                 with torch.no_grad():
-                    if merged is None:
-                        merged = (outputs_img * masks) + (images * (1.0 - masks))
+                    # Always compute fresh composite for the current active batch
+                    merged_sample = (outputs_img * masks) + (images * (1.0 - masks))
                     inputs_masked = images * (1.0 - masks)
                     grid = stitch_images(
                         postprocess(images),
                         postprocess(inputs_masked),
                         postprocess(outputs_img),
-                        postprocess(merged),
+                        postprocess(merged_sample),
                         img_per_row=1
                     )
                     sample_path = os.path.join(results_dir, f"sample_iter_{iteration:07d}.png")
